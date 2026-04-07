@@ -11,10 +11,18 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+import numpy as np
+
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+except Exception:  # pragma: no cover
+    KMeans = None
+    StandardScaler = None
 
 try:
     from web3 import Web3
-except Exception:
+except Exception:  # pragma: no cover
     Web3 = None
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -138,6 +146,20 @@ def canonical_hash(data: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def parse_eth(value_wei: Any) -> float:
+    try:
+        return int(str(value_wei)) / 1e18
+    except Exception:
+        return 0.0
+
+
+def parse_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(str(value))
+    except Exception:
+        return default
+
+
 def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
     if not ETHERSCAN_API_KEY:
         raise RuntimeError("ETHERSCAN_API_KEY is not configured")
@@ -160,20 +182,53 @@ def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
     return result
 
 
-def build_graph(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+def compact_txs(txs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for tx in txs:
+        value_wei = tx.get("value", "0")
+        output.append(
+            {
+                "hash": tx.get("hash", ""),
+                "from": str(tx.get("from", "")).lower(),
+                "to": str(tx.get("to", "")).lower(),
+                "value_wei": value_wei,
+                "value_eth": round(parse_eth(value_wei), 6),
+                "gas_price_wei": str(tx.get("gasPrice", "0")),
+                "gas_used": str(tx.get("gasUsed", "0")),
+                "fee_eth": round(parse_int(tx.get("gasPrice", 0)) * parse_int(tx.get("gasUsed", 0)) / 1e18, 10),
+                "time_stamp": tx.get("timeStamp", "0"),
+            }
+        )
+    return output
+
+
+def build_graph(address: str, txs: list[dict[str, Any]], cluster_map: dict[str, str] | None = None) -> dict[str, Any]:
     nodes = [{"id": address, "name": address, "symbolSize": 56, "itemStyle": {"color": "#0b5fff"}}]
     links = []
     seen = {address}
+    color_map = {
+        "高频交互簇": "#ef4444",
+        "高费率交互簇": "#f59e0b",
+        "大额流转簇": "#8b5cf6",
+        "一般交互簇": "#64748b",
+    }
+
     for tx in txs:
         src = str(tx.get("from", "")).lower()
         dst = str(tx.get("to", "")).lower()
         if not src or not dst:
             continue
         if src not in seen:
-            nodes.append({"id": src, "name": src, "symbolSize": 28})
+            style = {}
+            if cluster_map and src in cluster_map:
+                style = {"color": color_map.get(cluster_map[src], "#64748b")}
+            nodes.append({"id": src, "name": src, "symbolSize": 28, "itemStyle": style})
             seen.add(src)
         if dst not in seen:
-            nodes.append({"id": dst, "name": dst, "symbolSize": 28})
+            style = {}
+            if cluster_map and dst in cluster_map:
+                style = {"color": color_map.get(cluster_map[dst], "#64748b")}
+            nodes.append({"id": dst, "name": dst, "symbolSize": 28, "itemStyle": style})
             seen.add(dst)
         links.append({"source": src, "target": dst})
     return {"nodes": nodes, "links": links}
@@ -193,10 +248,7 @@ def detect_risk(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
         elif f == address:
             outgoing += 1
             counterparties.add(t)
-        try:
-            max_eth = max(max_eth, int(tx.get("value", "0")) / 1e18)
-        except Exception:
-            pass
+        max_eth = max(max_eth, parse_eth(tx.get("value", "0")))
 
     score = 0
     alerts = []
@@ -224,6 +276,138 @@ def detect_risk(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
         "score": score,
         "level": level,
         "alerts": alerts,
+    }
+
+
+def cluster_addresses(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    参考 TPM 方案：基于对手地址特征做标准化后执行 KMeans 聚类。
+    特征维度：
+    - avg_fee_eth
+    - total_fee_eth
+    - tx_count
+    - fee_std_eth
+    - in_ratio
+    - out_ratio
+    """
+    peers: dict[str, dict[str, Any]] = {}
+    for tx in txs:
+        src = str(tx.get("from", "")).lower()
+        dst = str(tx.get("to", "")).lower()
+        if not src or not dst:
+            continue
+        if src != address and dst != address:
+            continue
+
+        peer = src if dst == address else dst
+        if peer == address:
+            continue
+
+        if peer not in peers:
+            peers[peer] = {
+                "in_cnt": 0,
+                "out_cnt": 0,
+                "volume_eth": 0.0,
+                "fees": [],
+            }
+
+        if dst == address:
+            peers[peer]["in_cnt"] += 1
+        else:
+            peers[peer]["out_cnt"] += 1
+        peers[peer]["volume_eth"] += parse_eth(tx.get("value", "0"))
+        peers[peer]["fees"].append(float(tx.get("fee_eth", 0)))
+
+    if len(peers) < 2:
+        return {
+            "method": "kmeans-feature-clustering",
+            "target": address,
+            "cluster_count": 0,
+            "address_count": len(peers),
+            "clusters": [],
+            "peer_cluster_map": {},
+            "note": "对手地址数量不足，无法执行聚类。",
+        }
+
+    if KMeans is None or StandardScaler is None:
+        return {
+            "method": "kmeans-feature-clustering",
+            "target": address,
+            "cluster_count": 0,
+            "address_count": len(peers),
+            "clusters": [],
+            "peer_cluster_map": {},
+            "note": "未安装 scikit-learn，无法执行 KMeans 聚类。",
+        }
+
+    peer_list = list(peers.keys())
+    feature_rows = []
+    for p in peer_list:
+        s = peers[p]
+        tx_count = s["in_cnt"] + s["out_cnt"]
+        avg_fee = float(np.mean(s["fees"])) if s["fees"] else 0.0
+        total_fee = float(np.sum(s["fees"])) if s["fees"] else 0.0
+        fee_std = float(np.std(s["fees"])) if len(s["fees"]) > 1 else 0.0
+        in_ratio = s["in_cnt"] / tx_count if tx_count else 0.0
+        out_ratio = s["out_cnt"] / tx_count if tx_count else 0.0
+        feature_rows.append([avg_fee, total_fee, tx_count, fee_std, in_ratio, out_ratio])
+
+    mat = np.array(feature_rows, dtype=float)
+    scaler = StandardScaler()
+    mat_scaled = scaler.fit_transform(mat)
+
+    n_clusters = min(3, len(peer_list))
+    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = model.fit_predict(mat_scaled)
+
+    grouped: dict[int, list[str]] = {}
+    for peer, label in zip(peer_list, labels):
+        grouped.setdefault(int(label), []).append(peer)
+
+    peer_cluster_map: dict[str, str] = {}
+    clusters = []
+    for idx, (label, members) in enumerate(sorted(grouped.items(), key=lambda x: x[0]), start=1):
+        interaction_count = sum(peers[m]["in_cnt"] + peers[m]["out_cnt"] for m in members)
+        interaction_volume = round(sum(peers[m]["volume_eth"] for m in members), 6)
+        cluster_fees = [fee for m in members for fee in peers[m]["fees"]]
+        avg_fee = float(np.mean(cluster_fees)) if cluster_fees else 0.0
+        total_fee = float(np.sum(cluster_fees)) if cluster_fees else 0.0
+
+        # 将聚类标签映射为可解释业务名称
+        if interaction_count >= 15:
+            cluster_name = "高频交互簇"
+        elif avg_fee > 0.001:
+            cluster_name = "高费率交互簇"
+        elif interaction_volume > 50:
+            cluster_name = "大额流转簇"
+        else:
+            cluster_name = "一般交互簇"
+
+        for m in members:
+            peer_cluster_map[m] = cluster_name
+
+        clusters.append(
+            {
+                "cluster_id": f"C{idx}",
+                "raw_label": int(label),
+                "label": cluster_name,
+                "size": len(members),
+                "interaction_count": interaction_count,
+                "interaction_volume_eth": interaction_volume,
+                "avg_fee_eth": round(avg_fee, 10),
+                "total_fee_eth": round(total_fee, 10),
+                "members": members,
+            }
+        )
+
+    return {
+        "method": "kmeans-feature-clustering",
+        "feature_columns": ["avg_fee_eth", "total_fee_eth", "tx_count", "fee_std_eth", "in_ratio", "out_ratio"],
+        "target": address,
+        "cluster_count": len(clusters),
+        "address_count": len(peers),
+        "clusters": clusters,
+        "peer_cluster_map": peer_cluster_map,
     }
 
 
@@ -261,7 +445,7 @@ def read_chain_evidences(address: str) -> list[dict[str, Any]]:
 
 
 @app.errorhandler(ValidationError)
-def _on_validation(err):
+def on_validation_error(err: ValidationError):
     return jsonify({"error": str(err)}), 400
 
 
@@ -288,36 +472,37 @@ def analyze():
     address = normalize_address(body.get("address", ""))
     limit = max(10, min(int(body.get("limit", DEFAULT_TX_LIMIT)), 100))
 
-    txs = etherscan_fetch(address, limit)
-    graph = build_graph(address, txs)
+    txs_raw = etherscan_fetch(address, limit)
+    txs = compact_txs(txs_raw)
     risk = detect_risk(address, txs)
+    clustering = cluster_addresses(address, txs)
+    graph = build_graph(address, txs, clustering["peer_cluster_map"])
 
-    compact = []
-    for tx in txs:
-        v = tx.get("value", "0")
-        compact.append(
-            {
-                "hash": tx.get("hash", ""),
-                "from": str(tx.get("from", "")).lower(),
-                "to": str(tx.get("to", "")).lower(),
-                "value_wei": v,
-                "value_eth": round(int(v) / 1e18, 6) if str(v).isdigit() else 0,
-                "time_stamp": tx.get("timeStamp", "0"),
-            }
-        )
+    report_hash = canonical_hash({"address": address, "risk": risk, "clustering": clustering, "txs": txs})
+    write_audit("analyze", address, {"limit": limit, "risk": risk, "cluster_count": clustering["cluster_count"]})
 
-    report_hash = canonical_hash({"address": address, "risk": risk, "txs": compact})
-    write_audit("analyze", address, {"limit": limit, "risk": risk})
     return jsonify(
         {
             "address": address,
-            "tx_count": len(compact),
+            "tx_count": len(txs),
             "risk": risk,
+            "clustering": clustering,
             "graph": graph,
-            "txs": compact,
+            "txs": txs,
             "report_hash": report_hash,
         }
     )
+
+
+@app.route("/api/cluster", methods=["POST"])
+def cluster_api():
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    limit = max(10, min(int(body.get("limit", DEFAULT_TX_LIMIT)), 100))
+    txs = compact_txs(etherscan_fetch(address, limit))
+    clustering = cluster_addresses(address, txs)
+    write_audit("cluster", address, {"limit": limit, "cluster_count": clustering["cluster_count"]})
+    return jsonify(clustering)
 
 
 @app.route("/api/evidence/register", methods=["POST"])

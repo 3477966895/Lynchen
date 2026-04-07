@@ -3,3 +3,5 @@ flask-cors==6.0.1
 requests==2.32.5
 web3==7.14.0
 python-dotenv==1.2.1
+numpy==2.2.5
+scikit-learn==1.7.0
