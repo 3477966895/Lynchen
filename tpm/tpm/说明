@@ -1,0 +1,6 @@
+tron_analysis_system/
+├── app.py                 # Flask主应用，包含所有API
+├── templates/
+│   └── index.html         # 前端界面
+├── requirements.txt       # 依赖列表
+└── README.md              # 使用说明（可选）
