@@ -3,15 +3,20 @@ import json
 import os
 import re
 import sqlite3
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 from flask_cors import CORS
-import numpy as np
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
 
 try:
     from sklearn.cluster import KMeans
@@ -37,6 +42,13 @@ DEFAULT_TX_LIMIT = int(os.getenv("TX_LIMIT", "50"))
 WEB3_PROVIDER_URI = os.getenv("WEB3_PROVIDER_URI", "http://127.0.0.1:7545")
 CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", "")
 SERVER_PRIVATE_KEY = os.getenv("SERVER_PRIVATE_KEY", "")
+
+BLACKLIST = {"0x000000000000000000000000000000000000dead"}
+
+LABEL_HIGH_FREQ = "高频交互簇"
+LABEL_HIGH_FEE = "高费率交互簇"
+LABEL_HIGH_VOLUME = "大额流转簇"
+LABEL_NORMAL = "一般交互簇"
 
 CONTRACT_ABI = [
     {
@@ -71,6 +83,17 @@ CONTRACT_ABI = [
 
 app = Flask(__name__)
 CORS(app)
+
+UI_PAGES = {"index.html", "analyze.html", "batch.html", "insight.html", "evidence.html"}
+
+# 演示缓存：用于导出、批量复制、聚类与最新交易检测
+cache: dict[str, Any] = {
+    "address": None,
+    "transactions": [],
+    "counterparties": {},
+    "cluster_labels": None,
+    "latest_tx_hash": None,
+}
 
 
 class ValidationError(Exception):
@@ -153,6 +176,17 @@ def parse_eth(value_wei: Any) -> float:
         return 0.0
 
 
+def parse_amount(value: Any, decimals: Any = 18) -> float:
+    try:
+        base = int(str(value))
+        dec = int(str(decimals))
+        if dec < 0:
+            dec = 18
+        return base / (10 ** dec)
+    except Exception:
+        return 0.0
+
+
 def parse_int(value: Any, default: int = 0) -> int:
     try:
         return int(str(value))
@@ -160,13 +194,46 @@ def parse_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
+def vec_mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    if np is not None:
+        return float(np.mean(values))
+    return float(sum(values) / len(values))
+
+
+def vec_sum(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    if np is not None:
+        return float(np.sum(values))
+    return float(sum(values))
+
+
+def vec_std(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    if np is not None:
+        return float(np.std(values))
+    mean = vec_mean(values)
+    return float((sum((x - mean) ** 2 for x in values) / len(values)) ** 0.5)
+
+
+def parse_limit(raw: Any, default_limit: int = DEFAULT_TX_LIMIT) -> int:
+    try:
+        value = int(raw)
+    except Exception:
+        value = default_limit
+    return max(10, min(value, 100))
+
+
+def etherscan_request(action: str, address: str, limit: int) -> list[dict[str, Any]]:
     if not ETHERSCAN_API_KEY:
         raise RuntimeError("ETHERSCAN_API_KEY is not configured")
     params = {
         "chainid": ETHERSCAN_CHAIN_ID,
         "module": "account",
-        "action": "txlist",
+        "action": action,
         "address": address,
         "page": 1,
         "offset": limit,
@@ -179,38 +246,154 @@ def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
     result = payload.get("result", [])
     if isinstance(result, str):
         return []
+    if not isinstance(result, list):
+        return []
     return result
 
 
-def compact_txs(txs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
+    """
+    获取更完整的交易集：
+    - 普通交易(txlist)
+    - 内部交易(txlistinternal)
+    - ERC20 交易(tokentx)
+    """
+    normal_rows = etherscan_request("txlist", address, limit)
+    internal_rows = etherscan_request("txlistinternal", address, limit)
+    token_rows = etherscan_request("tokentx", address, limit)
+
+    merged: list[dict[str, Any]] = []
+
+    for row in normal_rows:
+        merged.append(
+            {
+                "hash": row.get("hash", ""),
+                "from": row.get("from", ""),
+                "to": row.get("to", ""),
+                "value": row.get("value", "0"),
+                "gasPrice": row.get("gasPrice", "0"),
+                "gasUsed": row.get("gasUsed", "0"),
+                "timeStamp": row.get("timeStamp", "0"),
+                "asset_symbol": "ETH",
+                "asset_type": "native",
+                "trace_id": row.get("transactionIndex", ""),
+            }
+        )
+
+    for row in internal_rows:
+        merged.append(
+            {
+                "hash": row.get("hash", ""),
+                "from": row.get("from", ""),
+                "to": row.get("to", ""),
+                "value": row.get("value", "0"),
+                "gasPrice": "0",
+                "gasUsed": "0",
+                "timeStamp": row.get("timeStamp", "0"),
+                "asset_symbol": "ETH",
+                "asset_type": "internal",
+                "trace_id": row.get("traceId", ""),
+            }
+        )
+
+    for row in token_rows:
+        amount = parse_amount(row.get("value", "0"), row.get("tokenDecimal", "18"))
+        merged.append(
+            {
+                "hash": row.get("hash", ""),
+                "from": row.get("from", ""),
+                "to": row.get("to", ""),
+                "value": str(amount),
+                "gasPrice": row.get("gasPrice", "0"),
+                "gasUsed": row.get("gasUsed", "0"),
+                "timeStamp": row.get("timeStamp", "0"),
+                "asset_symbol": row.get("tokenSymbol", "TOKEN"),
+                "asset_type": "erc20",
+                "trace_id": row.get("logIndex", ""),
+            }
+        )
+
+    # 去重：同类交易使用 hash + 类型 + 索引键
+    seen = set()
+    deduped = []
+    for row in merged:
+        key = f"{row.get('asset_type')}:{row.get('hash')}:{row.get('trace_id')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    deduped.sort(key=lambda x: parse_int(x.get("timeStamp", "0")), reverse=True)
+    return deduped
+
+
+def latest_tx_hash(address: str) -> str | None:
+    rows = etherscan_fetch(address, 1)
+    if not rows:
+        return None
+    tx_hash = str(rows[0].get("hash", ""))
+    return tx_hash or None
+
+
+def compact_txs(txs: list[dict[str, Any]], target_address: str | None = None) -> list[dict[str, Any]]:
     output = []
+    target = target_address.lower() if target_address else None
     for tx in txs:
-        value_wei = tx.get("value", "0")
+        src = str(tx.get("from", "")).lower()
+        dst = str(tx.get("to", "")).lower()
+        asset_type = str(tx.get("asset_type", "native"))
+        asset_symbol = str(tx.get("asset_symbol", "ETH") or "ETH").upper()
+        raw_value = tx.get("value", "0")
+        if asset_type == "erc20":
+            try:
+                amount = float(raw_value) if isinstance(raw_value, (int, float)) else float(str(raw_value or "0"))
+            except Exception:
+                amount = 0.0
+            value_wei = "0"
+        else:
+            amount = parse_eth(raw_value)
+            value_wei = raw_value
+        ts = parse_int(tx.get("timeStamp", "0"), 0)
+        direction = "other"
+        counterparty = ""
+        if target:
+            if src == target:
+                direction = "out"
+                counterparty = dst
+            elif dst == target:
+                direction = "in"
+                counterparty = src
         output.append(
             {
                 "hash": tx.get("hash", ""),
-                "from": str(tx.get("from", "")).lower(),
-                "to": str(tx.get("to", "")).lower(),
+                "from": src,
+                "to": dst,
+                "direction": direction,
+                "counterparty": counterparty,
                 "value_wei": value_wei,
-                "value_eth": round(parse_eth(value_wei), 6),
+                "value_eth": round(amount, 6),
                 "gas_price_wei": str(tx.get("gasPrice", "0")),
                 "gas_used": str(tx.get("gasUsed", "0")),
                 "fee_eth": round(parse_int(tx.get("gasPrice", 0)) * parse_int(tx.get("gasUsed", 0)) / 1e18, 10),
-                "time_stamp": tx.get("timeStamp", "0"),
+                "asset_symbol": asset_symbol,
+                "asset_type": asset_type,
+                "time_stamp": str(ts),
+                "time_text": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if ts else "",
             }
         )
     return output
 
 
 def build_graph(address: str, txs: list[dict[str, Any]], cluster_map: dict[str, str] | None = None) -> dict[str, Any]:
-    nodes = [{"id": address, "name": address, "symbolSize": 56, "itemStyle": {"color": "#0b5fff"}}]
+    core_color = "#0b5fff"
+    nodes = [{"id": address, "name": address, "symbolSize": 56, "category": "core_address", "itemStyle": {"color": core_color}}]
     links = []
     seen = {address}
     color_map = {
-        "高频交互簇": "#ef4444",
-        "高费率交互簇": "#f59e0b",
-        "大额流转簇": "#8b5cf6",
-        "一般交互簇": "#64748b",
+        LABEL_HIGH_FREQ: "#ef4444",
+        LABEL_HIGH_FEE: "#f59e0b",
+        LABEL_HIGH_VOLUME: "#8b5cf6",
+        LABEL_NORMAL: "#64748b",
     }
 
     for tx in txs:
@@ -218,78 +401,104 @@ def build_graph(address: str, txs: list[dict[str, Any]], cluster_map: dict[str, 
         dst = str(tx.get("to", "")).lower()
         if not src or not dst:
             continue
-        if src not in seen:
-            style = {}
-            if cluster_map and src in cluster_map:
-                style = {"color": color_map.get(cluster_map[src], "#64748b")}
-            nodes.append({"id": src, "name": src, "symbolSize": 28, "itemStyle": style})
-            seen.add(src)
-        if dst not in seen:
-            style = {}
-            if cluster_map and dst in cluster_map:
-                style = {"color": color_map.get(cluster_map[dst], "#64748b")}
-            nodes.append({"id": dst, "name": dst, "symbolSize": 28, "itemStyle": style})
-            seen.add(dst)
-        links.append({"source": src, "target": dst})
-    return {"nodes": nodes, "links": links}
 
+        if src not in seen:
+            category = cluster_map.get(src, LABEL_NORMAL) if cluster_map else LABEL_NORMAL
+            nodes.append(
+                {
+                    "id": src,
+                    "name": src,
+                    "symbolSize": 28,
+                    "category": category,
+                    "itemStyle": {"color": color_map.get(category, "#64748b")},
+                }
+            )
+            seen.add(src)
+
+        if dst not in seen:
+            category = cluster_map.get(dst, LABEL_NORMAL) if cluster_map else LABEL_NORMAL
+            nodes.append(
+                {
+                    "id": dst,
+                    "name": dst,
+                    "symbolSize": 28,
+                    "category": category,
+                    "itemStyle": {"color": color_map.get(category, "#64748b")},
+                }
+            )
+            seen.add(dst)
+
+        links.append({"source": src, "target": dst, "amount": tx.get("value_eth", 0), "tx_count": 1})
+
+    categories = [
+        {"name": "core_address", "itemStyle": {"color": core_color}},
+        {"name": LABEL_HIGH_FREQ, "itemStyle": {"color": color_map[LABEL_HIGH_FREQ]}},
+        {"name": LABEL_HIGH_FEE, "itemStyle": {"color": color_map[LABEL_HIGH_FEE]}},
+        {"name": LABEL_HIGH_VOLUME, "itemStyle": {"color": color_map[LABEL_HIGH_VOLUME]}},
+        {"name": LABEL_NORMAL, "itemStyle": {"color": color_map[LABEL_NORMAL]}},
+    ]
+    return {"nodes": nodes, "links": links, "categories": categories}
 
 def detect_risk(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
     incoming, outgoing = 0, 0
     counterparties = set()
     max_eth = 0.0
+    total_amount = 0.0
 
     for tx in txs:
         f = str(tx.get("from", "")).lower()
         t = str(tx.get("to", "")).lower()
+        asset_symbol = str(tx.get("asset_symbol", "ETH")).upper()
+        amount = float(tx.get("value_eth", 0.0))
+        if asset_symbol == "ETH":
+            total_amount += amount
+
         if t == address:
             incoming += 1
             counterparties.add(f)
         elif f == address:
             outgoing += 1
             counterparties.add(t)
-        max_eth = max(max_eth, parse_eth(tx.get("value", "0")))
+
+        if asset_symbol == "ETH":
+            max_eth = max(max_eth, amount)
 
     score = 0
     alerts = []
     if len(txs) >= 40:
-        score += 35
-        alerts.append("短窗口交易频次高")
+        score += 30
+        alerts.append("high-frequency-transactions")
     if len(counterparties) >= 18:
         score += 25
-        alerts.append("交易对手分散度异常")
+        alerts.append("too-many-counterparties")
     if max_eth >= 200:
-        score += 30
-        alerts.append("存在大额转账")
-    if outgoing > incoming * 3 and outgoing >= 15:
         score += 20
-        alerts.append("资金单向外流明显")
+        alerts.append("large-single-transfer")
+    if outgoing > incoming * 3 and outgoing >= 15:
+        score += 15
+        alerts.append("one-way-outflow")
+    if address in BLACKLIST:
+        score += 40
+        alerts.append("blacklist-hit")
+    if total_amount >= 1000:
+        score += 10
+        alerts.append("large-total-volume")
 
     score = min(100, score)
-    level = "LOW" if score < 35 else "MEDIUM" if score < 70 else "HIGH"
+    level = "LOW" if score < 35 else ("MEDIUM" if score < 70 else "HIGH")
 
     return {
         "in_count": incoming,
         "out_count": outgoing,
         "counterparty_count": len(counterparties),
         "max_tx_eth": round(max_eth, 6),
+        "total_amount_eth": round(total_amount, 6),
         "score": score,
         "level": level,
         "alerts": alerts,
     }
 
-
 def cluster_addresses(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    参考 TPM 方案：基于对手地址特征做标准化后执行 KMeans 聚类。
-    特征维度：
-    - avg_fee_eth
-    - total_fee_eth
-    - tx_count
-    - fee_std_eth
-    - in_ratio
-    - out_ratio
-    """
     peers: dict[str, dict[str, Any]] = {}
     for tx in txs:
         src = str(tx.get("from", "")).lower()
@@ -315,7 +524,9 @@ def cluster_addresses(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]
             peers[peer]["in_cnt"] += 1
         else:
             peers[peer]["out_cnt"] += 1
-        peers[peer]["volume_eth"] += parse_eth(tx.get("value", "0"))
+
+        if str(tx.get("asset_symbol", "ETH")).upper() == "ETH":
+            peers[peer]["volume_eth"] += float(tx.get("value_eth", 0))
         peers[peer]["fees"].append(float(tx.get("fee_eth", 0)))
 
     if len(peers) < 2:
@@ -326,65 +537,71 @@ def cluster_addresses(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]
             "address_count": len(peers),
             "clusters": [],
             "peer_cluster_map": {},
-            "note": "对手地址数量不足，无法执行聚类。",
-        }
-
-    if KMeans is None or StandardScaler is None:
-        return {
-            "method": "kmeans-feature-clustering",
-            "target": address,
-            "cluster_count": 0,
-            "address_count": len(peers),
-            "clusters": [],
-            "peer_cluster_map": {},
-            "note": "未安装 scikit-learn，无法执行 KMeans 聚类。",
+            "note": "not-enough-counterparties-for-clustering",
         }
 
     peer_list = list(peers.keys())
     feature_rows = []
-    for p in peer_list:
-        s = peers[p]
-        tx_count = s["in_cnt"] + s["out_cnt"]
-        avg_fee = float(np.mean(s["fees"])) if s["fees"] else 0.0
-        total_fee = float(np.sum(s["fees"])) if s["fees"] else 0.0
-        fee_std = float(np.std(s["fees"])) if len(s["fees"]) > 1 else 0.0
-        in_ratio = s["in_cnt"] / tx_count if tx_count else 0.0
-        out_ratio = s["out_cnt"] / tx_count if tx_count else 0.0
+    for peer in peer_list:
+        row = peers[peer]
+        tx_count = row["in_cnt"] + row["out_cnt"]
+        avg_fee = vec_mean(row["fees"]) if row["fees"] else 0.0
+        total_fee = vec_sum(row["fees"]) if row["fees"] else 0.0
+        fee_std = vec_std(row["fees"]) if row["fees"] else 0.0
+        in_ratio = row["in_cnt"] / tx_count if tx_count else 0.0
+        out_ratio = row["out_cnt"] / tx_count if tx_count else 0.0
         feature_rows.append([avg_fee, total_fee, tx_count, fee_std, in_ratio, out_ratio])
 
-    mat = np.array(feature_rows, dtype=float)
-    scaler = StandardScaler()
-    mat_scaled = scaler.fit_transform(mat)
+    labels: list[int] = []
+    method = "kmeans-feature-clustering"
 
-    n_clusters = min(3, len(peer_list))
-    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    labels = model.fit_predict(mat_scaled)
+    if KMeans is not None and StandardScaler is not None and np is not None:
+        mat = np.array(feature_rows, dtype=float)
+        scaler = StandardScaler()
+        mat_scaled = scaler.fit_transform(mat)
+        n_clusters = min(3, len(peer_list))
+        model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = [int(x) for x in model.fit_predict(mat_scaled)]
+    else:
+        method = "rule-based-fallback-clustering"
+        for row in feature_rows:
+            avg_fee, _total_fee, tx_count, _fee_std, _in_ratio, _out_ratio = row
+            if tx_count >= 15:
+                labels.append(0)
+            elif avg_fee > 0.001:
+                labels.append(1)
+            elif tx_count >= 8:
+                labels.append(2)
+            else:
+                labels.append(3)
 
-    grouped: dict[int, list[str]] = {}
+    grouped: dict[int, list[str]] = defaultdict(list)
     for peer, label in zip(peer_list, labels):
-        grouped.setdefault(int(label), []).append(peer)
+        grouped[int(label)].append(peer)
 
     peer_cluster_map: dict[str, str] = {}
+    peer_cluster_id_map: dict[str, str] = {}
     clusters = []
     for idx, (label, members) in enumerate(sorted(grouped.items(), key=lambda x: x[0]), start=1):
         interaction_count = sum(peers[m]["in_cnt"] + peers[m]["out_cnt"] for m in members)
         interaction_volume = round(sum(peers[m]["volume_eth"] for m in members), 6)
         cluster_fees = [fee for m in members for fee in peers[m]["fees"]]
-        avg_fee = float(np.mean(cluster_fees)) if cluster_fees else 0.0
-        total_fee = float(np.sum(cluster_fees)) if cluster_fees else 0.0
+        avg_fee = vec_mean(cluster_fees) if cluster_fees else 0.0
+        avg_tx_per_addr = interaction_count / len(members) if members else 0.0
+        avg_volume_per_addr = interaction_volume / len(members) if members else 0.0
 
-        # 将聚类标签映射为可解释业务名称
-        if interaction_count >= 15:
-            cluster_name = "高频交互簇"
+        if avg_tx_per_addr >= 8:
+            cluster_name = LABEL_HIGH_FREQ
+        elif avg_volume_per_addr > 20:
+            cluster_name = LABEL_HIGH_VOLUME
         elif avg_fee > 0.001:
-            cluster_name = "高费率交互簇"
-        elif interaction_volume > 50:
-            cluster_name = "大额流转簇"
+            cluster_name = LABEL_HIGH_FEE
         else:
-            cluster_name = "一般交互簇"
+            cluster_name = LABEL_NORMAL
 
-        for m in members:
-            peer_cluster_map[m] = cluster_name
+        for member in members:
+            peer_cluster_map[member] = cluster_name
+            peer_cluster_id_map[member] = f"C{idx}"
 
         clusters.append(
             {
@@ -395,19 +612,145 @@ def cluster_addresses(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]
                 "interaction_count": interaction_count,
                 "interaction_volume_eth": interaction_volume,
                 "avg_fee_eth": round(avg_fee, 10),
-                "total_fee_eth": round(total_fee, 10),
+                "avg_tx_per_address": round(avg_tx_per_addr, 4),
+                "avg_volume_per_address_eth": round(avg_volume_per_addr, 6),
                 "members": members,
             }
         )
 
     return {
-        "method": "kmeans-feature-clustering",
+        "method": method,
         "feature_columns": ["avg_fee_eth", "total_fee_eth", "tx_count", "fee_std_eth", "in_ratio", "out_ratio"],
         "target": address,
         "cluster_count": len(clusters),
         "address_count": len(peers),
         "clusters": clusters,
         "peer_cluster_map": peer_cluster_map,
+        "peer_cluster_id_map": peer_cluster_id_map,
+        "note": "" if method == "kmeans-feature-clustering" else "numpy-or-sklearn-missing-fallback-rule-clustering",
+    }
+
+
+def one_hop_trace(address: str, txs: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, float]] = defaultdict(lambda: {"amount": 0.0, "count": 0})
+    for tx in txs:
+        if direction == "forward" and tx.get("direction") == "out":
+            peer = tx.get("counterparty")
+        elif direction == "backward" and tx.get("direction") == "in":
+            peer = tx.get("counterparty")
+        else:
+            continue
+        if not peer:
+            continue
+        grouped[peer]["amount"] += float(tx.get("value_eth", 0.0))
+        grouped[peer]["count"] += 1
+
+    rows = []
+    for peer, summary in grouped.items():
+        rows.append(
+            {
+                "from": address if direction == "forward" else peer,
+                "to": peer if direction == "forward" else address,
+                "amount_eth": round(summary["amount"], 6),
+                "tx_count": int(summary["count"]),
+            }
+        )
+    return sorted(rows, key=lambda x: x["amount_eth"], reverse=True)
+
+
+def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    if not txs:
+        raise ValidationError("no-transaction-data")
+
+    counterparties = {tx.get("counterparty") for tx in txs if tx.get("counterparty")}
+    in_amount = sum(
+        float(tx.get("value_eth", 0.0))
+        for tx in txs
+        if tx.get("direction") == "in" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH"
+    )
+    out_amount = sum(
+        float(tx.get("value_eth", 0.0))
+        for tx in txs
+        if tx.get("direction") == "out" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH"
+    )
+    total_amount = in_amount + out_amount
+    total_fee = sum(float(tx.get("fee_eth", 0.0)) for tx in txs)
+    active_days = len({(tx.get("time_text") or "")[:10] for tx in txs if tx.get("time_text")})
+    risk = detect_risk(address, txs)
+
+    asset_counter: dict[str, int] = defaultdict(int)
+    for tx in txs:
+        asset = str(tx.get("asset_symbol", "ETH")).upper()
+        asset_counter[asset] += 1
+    asset_mix = [{"asset": k, "tx_count": v} for k, v in sorted(asset_counter.items(), key=lambda kv: kv[1], reverse=True)]
+
+    tags = []
+    if risk["counterparty_count"] > 30:
+        tags.append("active-network")
+    if out_amount > in_amount * 2 and risk["out_count"] >= 10:
+        tags.append("outflow-heavy")
+    if total_amount > 500:
+        tags.append("high-volume")
+    if not tags:
+        tags.append("normal-account")
+
+    return {
+        "address": address,
+        "total_transactions": len(txs),
+        "in_amount_eth": round(in_amount, 6),
+        "out_amount_eth": round(out_amount, 6),
+        "total_amount_eth": round(total_amount, 6),
+        "avg_amount_eth": round(total_amount / len(txs), 6),
+        "total_fee_eth": round(total_fee, 8),
+        "unique_counterparties": len(counterparties),
+        "active_days": active_days,
+        "risk_score": risk["score"],
+        "risk_level": risk["level"],
+        "risk_alerts": risk["alerts"],
+        "tags": tags,
+        "asset_mix": asset_mix,
+    }
+
+
+def build_time_series(txs: list[dict[str, Any]]) -> dict[str, Any]:
+    # series: 仅统计 ETH（native + internal），避免与 ERC20 直接相加产生口径错误
+    bucket: dict[str, dict[str, float]] = defaultdict(lambda: {"amount": 0.0, "count": 0})
+    asset_bucket: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: {"amount": 0.0, "count": 0}))
+    for tx in txs:
+        t = tx.get("time_text", "")
+        date_key = t[:10] if t else ""
+        if not date_key:
+            continue
+        asset = str(tx.get("asset_symbol", "ETH")).upper()
+        amount = float(tx.get("value_eth", 0.0))
+        asset_bucket[asset][date_key]["amount"] += amount
+        asset_bucket[asset][date_key]["count"] += 1
+        if asset == "ETH":
+            bucket[date_key]["amount"] += amount
+            bucket[date_key]["count"] += 1
+
+    series = [{"date": d, "amount": round(v["amount"], 6), "count": int(v["count"])} for d, v in sorted(bucket.items())]
+    amounts = [x["amount"] for x in series]
+    if not amounts:
+        return {"series": [], "anomalies": [], "series_by_asset": {}, "series_unit": "asset-native-unit"}
+
+    mean = vec_mean(amounts)
+    std = vec_std(amounts)
+    upper = mean + 3 * std
+    lower = mean - 3 * std
+    anomalies = [item for item in series if item["amount"] > upper or item["amount"] < lower]
+    series_by_asset: dict[str, list[dict[str, Any]]] = {}
+    for asset, per_day in asset_bucket.items():
+        series_by_asset[asset] = [
+            {"date": d, "amount": round(v["amount"], 6), "count": int(v["count"])}
+            for d, v in sorted(per_day.items())
+        ]
+    return {
+        "series": series,
+        "anomalies": anomalies,
+        "series_by_asset": series_by_asset,
+        "series_unit": "ETH-only",
+        "note": "series字段仅统计ETH，不与ERC20直接混加；完整分币种结果见series_by_asset",
     }
 
 
@@ -444,14 +787,142 @@ def read_chain_evidences(address: str) -> list[dict[str, Any]]:
     return out
 
 
+def store_evidence_onchain(address: str, report_hash: str) -> str:
+    web3, contract, account = get_contract(readonly=False)
+    target = Web3.to_checksum_address(address)
+    sender = account.address
+    nonce = web3.eth.get_transaction_count(sender)
+
+    tx_data = contract.functions.storeEvidence(target, report_hash).build_transaction(
+        {
+            "from": sender,
+            "nonce": nonce,
+            "chainId": web3.eth.chain_id,
+            "gasPrice": web3.eth.gas_price,
+        }
+    )
+
+    if "gas" not in tx_data:
+        try:
+            tx_data["gas"] = web3.eth.estimate_gas(tx_data) + 20000
+        except Exception:
+            tx_data["gas"] = 250000
+
+    signed = web3.eth.account.sign_transaction(tx_data, private_key=SERVER_PRIVATE_KEY)
+    tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+    if int(receipt.status) != 1:
+        raise RuntimeError("on-chain transaction reverted")
+    return tx_hash.hex()
+
+
+def evidence_from_tx_hash(tx_hash: str) -> dict[str, Any]:
+    if Web3 is None:
+        raise RuntimeError("web3 is not installed")
+    if not CONTRACT_ADDRESS:
+        raise RuntimeError("CONTRACT_ADDRESS is not configured")
+
+    tx_hash = str(tx_hash).strip()
+    if not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
+        raise ValidationError("tx_hash must be 0x + 64 hex chars")
+
+    web3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URI))
+    if not web3.is_connected():
+        raise RuntimeError("unable to connect WEB3_PROVIDER_URI")
+
+    contract_addr = Web3.to_checksum_address(CONTRACT_ADDRESS)
+    contract = web3.eth.contract(address=contract_addr, abi=CONTRACT_ABI)
+    try:
+        tx = web3.eth.get_transaction(Web3.to_hex(Web3.to_bytes(hexstr=tx_hash)))
+    except Exception:
+        raise ValidationError("tx hash not found on current chain")
+
+    if not tx.get("to") or Web3.to_checksum_address(tx["to"]) != contract_addr:
+        raise ValidationError("tx is not sent to TraceCoin contract")
+    if not tx.get("input") or tx["input"] == "0x":
+        raise ValidationError("tx input has no contract call data")
+
+    fn, args = contract.decode_function_input(tx["input"])
+    if fn.fn_name != "storeEvidence":
+        raise ValidationError("tx is not a storeEvidence call")
+
+    return {
+        "tx_hash": Web3.to_hex(tx["hash"]),
+        "block_number": int(tx["blockNumber"]) if tx.get("blockNumber") is not None else None,
+        "target": str(args.get("_target", "")).lower(),
+        "report_hash": str(args.get("_hash", "")).lower(),
+        "from": str(tx.get("from", "")).lower(),
+        "to": str(tx.get("to", "")).lower(),
+    }
+
+
+def evidence_from_block_number(block_number: int) -> dict[str, Any]:
+    if Web3 is None:
+        raise RuntimeError("web3 is not installed")
+    if not CONTRACT_ADDRESS:
+        raise RuntimeError("CONTRACT_ADDRESS is not configured")
+
+    web3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URI))
+    if not web3.is_connected():
+        raise RuntimeError("unable to connect WEB3_PROVIDER_URI")
+
+    contract_addr = Web3.to_checksum_address(CONTRACT_ADDRESS)
+    contract = web3.eth.contract(address=contract_addr, abi=CONTRACT_ABI)
+    block = web3.eth.get_block(block_number, full_transactions=True)
+
+    rows = []
+    for tx in block["transactions"]:
+        to_addr = tx.get("to")
+        if not to_addr:
+            continue
+        if Web3.to_checksum_address(to_addr) != contract_addr:
+            continue
+        if not tx.get("input") or tx["input"] == "0x":
+            continue
+        try:
+            fn, args = contract.decode_function_input(tx["input"])
+        except Exception:
+            continue
+        if fn.fn_name != "storeEvidence":
+            continue
+        rows.append(
+            {
+                "tx_hash": Web3.to_hex(tx["hash"]),
+                "target": str(args.get("_target", "")).lower(),
+                "report_hash": str(args.get("_hash", "")).lower(),
+                "from": str(tx.get("from", "")).lower(),
+                "to": str(to_addr).lower(),
+            }
+        )
+
+    return {"block_number": int(block_number), "count": len(rows), "records": rows}
+
+
 @app.errorhandler(ValidationError)
 def on_validation_error(err: ValidationError):
     return jsonify({"error": str(err)}), 400
 
 
+@app.errorhandler(RuntimeError)
+def on_runtime_error(err: RuntimeError):
+    return jsonify({"error": str(err)}), 400
+
+
+@app.errorhandler(requests.RequestException)
+def on_requests_error(err: requests.RequestException):
+    return jsonify({"error": f"upstream-request-failed: {str(err)}"}), 502
+
 @app.route("/")
 def index():
     return send_from_directory(".", "index.html")
+
+
+@app.route("/page/<name>")
+def page(name: str):
+    filename = f"{name}.html"
+    if filename not in UI_PAGES:
+        abort(404)
+    return send_from_directory(".", filename)
 
 
 @app.route("/api/health", methods=["GET"])
@@ -466,14 +937,56 @@ def health():
     )
 
 
+@app.route("/api/query", methods=["POST"])
+def query_transactions():
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    limit = parse_limit(body.get("limit", DEFAULT_TX_LIMIT))
+
+    txs = compact_txs(etherscan_fetch(address, limit), address)
+    if not txs:
+        return jsonify({"error": "no-transactions-found"}), 404
+
+    counterparty_fees: dict[str, list[float]] = defaultdict(list)
+    for tx in txs:
+        cp = tx.get("counterparty")
+        if cp:
+            counterparty_fees[cp].append(float(tx.get("fee_eth", 0.0)))
+
+    cache["address"] = address
+    cache["transactions"] = txs
+    cache["counterparties"] = {
+        cp: {
+            "avg_fee": vec_mean(fees),
+            "total_fee": vec_sum(fees),
+            "tx_count": len(fees),
+            "fee_std": vec_std(fees),
+        }
+        for cp, fees in counterparty_fees.items()
+    }
+    cache["latest_tx_hash"] = latest_tx_hash(address)
+
+    clustering = cluster_addresses(address, txs)
+    cache["cluster_labels"] = clustering.get("peer_cluster_map", {})
+    write_audit("query", address, {"tx_count": len(txs), "counterparty_count": len(counterparty_fees)})
+
+    return jsonify(
+        {
+            "address": address,
+            "transactions": txs,
+            "counterparty_count": len(counterparty_fees),
+            "cluster_available": clustering["cluster_count"] > 0,
+        }
+    )
+
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     body = request.get_json(silent=True) or {}
     address = normalize_address(body.get("address", ""))
-    limit = max(10, min(int(body.get("limit", DEFAULT_TX_LIMIT)), 100))
+    limit = parse_limit(body.get("limit", DEFAULT_TX_LIMIT))
 
-    txs_raw = etherscan_fetch(address, limit)
-    txs = compact_txs(txs_raw)
+    txs = compact_txs(etherscan_fetch(address, limit), address)
     risk = detect_risk(address, txs)
     clustering = cluster_addresses(address, txs)
     graph = build_graph(address, txs, clustering["peer_cluster_map"])
@@ -494,15 +1007,142 @@ def analyze():
     )
 
 
-@app.route("/api/cluster", methods=["POST"])
-def cluster_api():
+@app.route("/api/batch", methods=["POST"])
+def batch_query():
+    body = request.get_json(silent=True) or {}
+    addresses = body.get("addresses", [])
+    if not isinstance(addresses, list):
+        raise ValidationError("addresses must be an array")
+
+    addresses = [normalize_address(a) for a in addresses if str(a).strip()]
+    if not addresses:
+        raise ValidationError("address list cannot be empty")
+    if len(addresses) > 5:
+        raise ValidationError("max 5 addresses in batch")
+
+    all_txs = []
+    cp_sets = []
+    for address in addresses:
+        txs = compact_txs(etherscan_fetch(address, min(DEFAULT_TX_LIMIT, 50)), address)
+        cp_sets.append({tx["counterparty"] for tx in txs if tx.get("counterparty")})
+        for tx in txs:
+            tx["source_address"] = address
+        all_txs.extend(txs)
+
+    common_counterparties = sorted(list(set.intersection(*cp_sets))) if cp_sets else []
+    write_audit("batch_query", None, {"address_count": len(addresses), "tx_count": len(all_txs)})
+    return jsonify({"transactions": all_txs, "common_counterparties": common_counterparties})
+
+
+@app.route("/api/trace", methods=["POST"])
+def trace_api():
     body = request.get_json(silent=True) or {}
     address = normalize_address(body.get("address", ""))
-    limit = max(10, min(int(body.get("limit", DEFAULT_TX_LIMIT)), 100))
-    txs = compact_txs(etherscan_fetch(address, limit))
+    direction = str(body.get("direction", "forward")).strip()
+    if direction not in {"forward", "backward"}:
+        raise ValidationError("direction must be forward/backward")
+
+    txs = compact_txs(etherscan_fetch(address, min(DEFAULT_TX_LIMIT, 100)), address)
+    return jsonify({"direction": direction, "paths": one_hop_trace(address, txs, direction)})
+
+
+@app.route("/api/profile", methods=["POST"])
+def profile_api():
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    txs = compact_txs(etherscan_fetch(address, min(DEFAULT_TX_LIMIT, 100)), address)
+    profile = build_address_profile(address, txs)
+    write_audit("profile", address, {"risk_score": profile["risk_score"]})
+    return jsonify(profile)
+
+
+@app.route("/api/timeseries", methods=["POST"])
+def timeseries_api():
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    txs = compact_txs(etherscan_fetch(address, min(DEFAULT_TX_LIMIT, 100)), address)
+    return jsonify(build_time_series(txs))
+
+
+@app.route("/api/graph", methods=["POST"])
+def graph_api():
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    txs = compact_txs(etherscan_fetch(address, min(DEFAULT_TX_LIMIT, 100)), address)
+    clustering = cluster_addresses(address, txs)
+    return jsonify(build_graph(address, txs, clustering["peer_cluster_map"]))
+
+
+@app.route("/api/cluster", methods=["POST", "GET"])
+def cluster_api():
+    if request.method == "GET":
+        if not cache["address"] or not cache["transactions"]:
+            return jsonify({"error": "query-address-first"}), 400
+        return jsonify(cluster_addresses(cache["address"], cache["transactions"]))
+
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    limit = parse_limit(body.get("limit", DEFAULT_TX_LIMIT))
+    txs = compact_txs(etherscan_fetch(address, limit), address)
     clustering = cluster_addresses(address, txs)
     write_audit("cluster", address, {"limit": limit, "cluster_count": clustering["cluster_count"]})
     return jsonify(clustering)
+
+
+@app.route("/api/latest", methods=["GET"])
+def latest_api():
+    raw = request.args.get("address", "")
+    if not raw:
+        return jsonify({"latest_hash": None, "changed": False})
+
+    address = normalize_address(raw)
+    if cache["address"] != address:
+        return jsonify({"latest_hash": None, "changed": False})
+
+    current_hash = latest_tx_hash(address)
+    changed = bool(current_hash and cache["latest_tx_hash"] != current_hash)
+    cache["latest_tx_hash"] = current_hash
+    return jsonify({"latest_hash": current_hash, "changed": changed})
+
+
+@app.route("/api/evidence/store_onchain", methods=["POST"])
+def evidence_store_onchain_api():
+    body = request.get_json(silent=True) or {}
+    address = normalize_address(body.get("address", ""))
+    report_hash = str(body.get("report_hash", "")).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", report_hash):
+        raise ValidationError("report_hash must be 64-char sha256 hex")
+
+    tx_hash = store_evidence_onchain(address, report_hash)
+    write_audit("store_onchain", address, {"report_hash": report_hash, "tx_hash": tx_hash})
+    return jsonify({"address": address, "report_hash": report_hash, "tx_hash": tx_hash})
+
+
+@app.route("/api/evidence/from_tx", methods=["POST"])
+def evidence_from_tx_api():
+    body = request.get_json(silent=True) or {}
+    tx_hash = str(body.get("tx_hash", "")).strip()
+    result = evidence_from_tx_hash(tx_hash)
+    write_audit("evidence_from_tx", result.get("target"), {"tx_hash": tx_hash})
+    return jsonify(result)
+
+
+@app.route("/api/evidence/from_block", methods=["POST"])
+def evidence_from_block_api():
+    body = request.get_json(silent=True) or {}
+    block_number = parse_int(body.get("block_number", -1), -1)
+    if block_number < 0:
+        raise ValidationError("block_number must be a non-negative integer")
+    result = evidence_from_block_number(block_number)
+    write_audit("evidence_from_block", None, {"block_number": block_number, "count": result.get("count", 0)})
+    return jsonify(result)
+
+
+@app.route("/api/evidence/chain/<address>", methods=["GET"])
+def evidence_chain_by_address(address: str):
+    address = normalize_address(address)
+    rows = read_chain_evidences(address)
+    return jsonify({"address": address, "onchain_records": rows, "count": len(rows)})
 
 
 @app.route("/api/evidence/register", methods=["POST"])

@@ -1,0 +1,244 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TraceCoin 报告与存证</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <style>
+    body { background: #f8fafc; padding: 16px; }
+    .card { border: 0; border-radius: 14px; box-shadow: 0 8px 20px rgba(0,0,0,.06); }
+    .mono { font-family: Consolas, Menlo, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+<div class="container-fluid">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">PDF 报告与区块链存证</h4>
+    <div class="d-flex gap-2">
+      <a class="btn btn-outline-secondary" href="/">返回导航</a>
+      <a class="btn btn-outline-primary" href="/page/analyze">去分析页</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div class="row g-2">
+        <div class="col-md-8"><input id="addressInput" class="form-control" placeholder="输入地址（用于链上存证与历史查询）" /></div>
+        <div class="col-md-4 d-grid gap-2 d-md-flex justify-content-md-end">
+          <button id="loadLocalBtn" class="btn btn-outline-dark">加载最近分析</button>
+          <button id="reloadBtn" class="btn btn-outline-primary">重新拉取分析</button>
+        </div>
+      </div>
+
+      <div class="mt-3 d-flex flex-wrap gap-2">
+        <button id="pdfBtn" class="btn btn-danger">1) 生成并下载 PDF</button>
+        <button id="storeBtn" class="btn btn-dark">2) 报告上链存证</button>
+        <button id="historyBtn" class="btn btn-secondary">3) 查询存证历史</button>
+      </div>
+
+      <div class="row g-2 mt-2">
+        <div class="col-md-8"><input id="verifyHash" class="form-control" placeholder="输入报告 SHA-256 Hash 进行验真" /></div>
+        <div class="col-md-4"><button id="verifyBtn" class="btn btn-outline-success w-100">4) 验证存证</button></div>
+      </div>
+
+      <div id="msg" class="mt-3"></div>
+
+      <div class="table-responsive mt-3">
+        <table class="table table-sm table-bordered table-striped">
+          <thead class="table-dark"><tr><th>ID</th><th>Hash</th><th>链上交易</th><th>风险</th><th>时间</th></tr></thead>
+          <tbody id="historyRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentAddress = "";
+let currentAnalyze = null;
+let currentTxs = [];
+let currentReportBlob = null;
+let currentReportHash = "";
+
+function isEvmAddress(v) { return /^0x[a-fA-F0-9]{40}$/.test(v || ""); }
+function shortHash(h) { return h ? `${h.slice(0, 10)}...${h.slice(-6)}` : "-"; }
+
+async function api(url, method = "GET", body = null) {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+function showMessage(type, text) {
+  document.getElementById("msg").innerHTML = `<div class='alert alert-${type}'>${text}</div>`;
+}
+
+function loadFromLocalStorage() {
+  try {
+    const addr = localStorage.getItem("tracecoin_current_address");
+    const txs = JSON.parse(localStorage.getItem("tracecoin_current_txs") || "[]");
+    const analyze = JSON.parse(localStorage.getItem("tracecoin_current_analyze") || "null");
+    if (!addr || !analyze) throw new Error("本地没有可用分析数据，请先在分析页完成查询");
+    currentAddress = addr;
+    currentTxs = txs;
+    currentAnalyze = analyze;
+    document.getElementById("addressInput").value = currentAddress;
+    currentReportHash = "";
+    currentReportBlob = null;
+    showMessage("success", "已加载最近分析数据，可直接生成 PDF 与上链");
+  } catch (e) {
+    showMessage("warning", e.message);
+  }
+}
+
+async function reloadAnalyzeFromServer() {
+  try {
+    const addr = document.getElementById("addressInput").value.trim();
+    if (!isEvmAddress(addr)) throw new Error("请输入合法 EVM 地址");
+    const data = await api("/api/analyze", "POST", { address: addr, limit: 80 });
+    currentAddress = data.address;
+    currentAnalyze = data;
+    currentTxs = data.txs || [];
+    localStorage.setItem("tracecoin_current_address", currentAddress);
+    localStorage.setItem("tracecoin_current_txs", JSON.stringify(currentTxs));
+    localStorage.setItem("tracecoin_current_analyze", JSON.stringify(currentAnalyze));
+    currentReportHash = "";
+    currentReportBlob = null;
+    showMessage("success", "已重新拉取分析数据");
+  } catch (e) {
+    showMessage("danger", e.message);
+  }
+}
+
+async function sha256Blob(blob) {
+  const buf = await blob.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest)).map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
+async function buildPdfBlob() {
+  if (!currentAnalyze || !currentAddress) throw new Error("请先加载分析数据");
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFontSize(14);
+  doc.text("TraceCoin Evidence Report", 10, 12);
+  doc.setFontSize(10);
+  doc.text(`Address: ${currentAddress}`, 10, 20);
+  doc.text(`Risk: ${currentAnalyze.risk.level} (${currentAnalyze.risk.score})`, 10, 26);
+  doc.text(`Tx Count: ${currentTxs.length}`, 10, 32);
+
+  const rows = currentTxs.slice(0, 80).map(tx => [
+    shortHash(tx.hash),
+    tx.time_text || "-",
+    tx.direction,
+    tx.counterparty || "-",
+    String(tx.value_eth),
+    tx.asset_symbol || "ETH"
+  ]);
+  doc.autoTable({
+    startY: 40,
+    head: [["Hash", "Time", "Dir", "Counterparty", "Amount", "Asset"]],
+    body: rows,
+    styles: { fontSize: 7 }
+  });
+  return doc.output("blob");
+}
+
+async function generatePdf() {
+  try {
+    currentReportBlob = await buildPdfBlob();
+    currentReportHash = await sha256Blob(currentReportBlob);
+    document.getElementById("verifyHash").value = currentReportHash;
+
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(currentReportBlob);
+    a.download = `Report_${currentAddress.slice(0, 10)}.pdf`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+
+    showMessage("success", `PDF 已生成，Hash: <span class='mono'>${currentReportHash}</span>`);
+  } catch (e) {
+    showMessage("danger", e.message);
+  }
+}
+
+async function storeOnChain() {
+  try {
+    if (!currentAddress || !currentAnalyze) throw new Error("请先加载分析数据");
+    if (!currentReportBlob) currentReportBlob = await buildPdfBlob();
+    if (!currentReportHash) currentReportHash = await sha256Blob(currentReportBlob);
+
+    const chain = await api("/api/evidence/store_onchain", "POST", { address: currentAddress, report_hash: currentReportHash });
+    await api("/api/evidence/register", "POST", {
+      address: currentAddress,
+      report_hash: currentReportHash,
+      tx_count: currentTxs.length,
+      risk_score: currentAnalyze.risk.score,
+      risk_level: currentAnalyze.risk.level,
+      chain_tx_hash: chain.tx_hash,
+      note: "pdf-report"
+    });
+
+    document.getElementById("verifyHash").value = currentReportHash;
+    showMessage("success", `上链成功，链上交易 Hash: <span class='mono'>${chain.tx_hash}</span>`);
+  } catch (e) {
+    showMessage("danger", e.message);
+  }
+}
+
+async function verifyEvidence() {
+  try {
+    const address = (document.getElementById("addressInput").value || currentAddress).trim();
+    const hash = document.getElementById("verifyHash").value.trim().toLowerCase();
+    if (!isEvmAddress(address)) throw new Error("请输入合法地址");
+    if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error("请输入 64 位 SHA-256 Hash");
+
+    const data = await api("/api/evidence/verify", "POST", { address, report_hash: hash });
+    if (data.is_valid) {
+      showMessage("success", `验真通过：DB=${data.db_match}，CHAIN=${data.chain_match}`);
+    } else {
+      showMessage("warning", "验真未通过：未匹配到存证记录");
+    }
+  } catch (e) {
+    showMessage("danger", e.message);
+  }
+}
+
+async function loadHistory() {
+  try {
+    const address = (document.getElementById("addressInput").value || currentAddress).trim();
+    if (!isEvmAddress(address)) throw new Error("请输入合法地址");
+    const data = await api(`/api/evidence/history/${address}`, "GET");
+
+    const tbody = document.getElementById("historyRows");
+    tbody.innerHTML = "";
+    data.history.forEach(row => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${row.id}</td><td class='mono'>${shortHash(row.report_hash)}</td><td class='mono'>${shortHash(row.chain_tx_hash || "")}</td><td>${row.risk_level}(${row.risk_score})</td><td>${row.created_at}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    showMessage("info", `已加载 ${data.history.length} 条存证历史`);
+  } catch (e) {
+    showMessage("danger", e.message);
+  }
+}
+
+document.getElementById("loadLocalBtn").onclick = loadFromLocalStorage;
+document.getElementById("reloadBtn").onclick = reloadAnalyzeFromServer;
+document.getElementById("pdfBtn").onclick = generatePdf;
+document.getElementById("storeBtn").onclick = storeOnChain;
+document.getElementById("verifyBtn").onclick = verifyEvidence;
+document.getElementById("historyBtn").onclick = loadHistory;
+
+const latestAddress = localStorage.getItem("tracecoin_current_address") || "";
+if (latestAddress) document.getElementById("addressInput").value = latestAddress;
+</script>
+</body>
+</html>

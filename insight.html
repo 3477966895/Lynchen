@@ -1,0 +1,178 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TraceCoin 地址画像与可视化</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  <style>
+    body { background: #f8fafc; padding: 16px; }
+    .card { border: 0; border-radius: 14px; box-shadow: 0 8px 20px rgba(0,0,0,.06); }
+    .mono { font-family: Consolas, Menlo, monospace; font-size: 12px; }
+    #timeChart, #relationGraph { width: 100%; height: 420px; }
+  </style>
+</head>
+<body>
+<div class="container-fluid">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">地址画像与可视化</h4>
+    <div class="d-flex gap-2">
+      <a class="btn btn-outline-secondary" href="/">返回导航</a>
+      <a class="btn btn-outline-primary" href="/page/analyze">去分析页</a>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="row g-2">
+        <div class="col-md-8"><input id="addressInput" class="form-control" placeholder="输入地址" /></div>
+        <div class="col-md-4 d-grid gap-2 d-md-flex justify-content-md-end">
+          <button id="profileBtn" class="btn btn-primary">地址画像</button>
+          <button id="traceInBtn" class="btn btn-warning">追踪流入</button>
+          <button id="traceOutBtn" class="btn btn-info">追踪流出</button>
+        </div>
+      </div>
+      <div class="row g-2 mt-1">
+        <div class="col-md-4"><button id="clusterBtn" class="btn btn-outline-dark w-100">地址聚类</button></div>
+        <div class="col-md-4"><button id="timeBtn" class="btn btn-outline-success w-100">时序分析</button></div>
+        <div class="col-md-4"><button id="graphBtn" class="btn btn-outline-danger w-100">关系图谱</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-lg-6">
+      <div class="card"><div class="card-body"><h6>画像结果</h6><div id="profileResult"></div></div></div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card"><div class="card-body"><h6>一跳追踪结果</h6><div id="traceResult"></div></div></div>
+    </div>
+  </div>
+
+  <div class="card mt-3"><div class="card-body"><h6>聚类结果</h6><div id="clusterResult"></div></div></div>
+  <div class="card mt-3"><div class="card-body"><h6>时序图</h6><div id="timeChart"></div></div></div>
+  <div class="card mt-3"><div class="card-body"><h6>关系图谱</h6><div id="relationGraph"></div></div></div>
+</div>
+
+<script>
+let relationChart = null;
+let timeChart = null;
+
+function isEvmAddress(v) { return /^0x[a-fA-F0-9]{40}$/.test(v || ""); }
+function getAddress() { return (document.getElementById("addressInput").value || "").trim(); }
+
+async function api(url, method = "GET", body = null) {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+function ensureAddress() {
+  const a = getAddress();
+  if (!isEvmAddress(a)) {
+    alert("请输入合法 EVM 地址");
+    return null;
+  }
+  return a;
+}
+
+async function loadProfile() {
+  const address = ensureAddress();
+  if (!address) return;
+  const data = await api("/api/profile", "POST", { address });
+  document.getElementById("profileResult").innerHTML = `
+    <div class='small'>
+      <div class='mono'>${data.address}</div>
+      交易总数：${data.total_transactions}<br>
+      总金额：${data.total_amount_eth}<br>
+      流入/流出：${data.in_amount_eth} / ${data.out_amount_eth}<br>
+      对手地址数：${data.unique_counterparties}<br>
+      风险：${data.risk_level} (${data.risk_score})<br>
+      标签：${(data.tags || []).join("、")}<br>
+      预警：${(data.risk_alerts || []).join("；") || "无"}
+    </div>`;
+}
+
+async function trace(direction) {
+  const address = ensureAddress();
+  if (!address) return;
+  const data = await api("/api/trace", "POST", { address, direction });
+  let html = "<ul class='small'>";
+  data.paths.forEach(p => html += `<li class='mono'>${p.from} -> ${p.to}，${p.amount_eth}，${p.tx_count} 笔</li>`);
+  html += "</ul>";
+  document.getElementById("traceResult").innerHTML = html || "暂无";
+}
+
+async function cluster() {
+  const address = ensureAddress();
+  if (!address) return;
+  const data = await api("/api/cluster", "POST", { address, limit: 80 });
+  if (!data.clusters || !data.clusters.length) {
+    document.getElementById("clusterResult").innerHTML = `<div class='alert alert-warning'>${data.note || "暂无聚类结果"}</div>`;
+    return;
+  }
+  let html = `<div class='alert alert-info'>共 ${data.cluster_count} 个簇（${data.method}）</div><ul class='small'>`;
+  data.clusters.forEach(c => html += `<li>${c.cluster_id} - ${c.label}：${c.size} 地址，${c.interaction_count} 次交互，${c.interaction_volume_eth} ETH</li>`);
+  html += "</ul>";
+  document.getElementById("clusterResult").innerHTML = html;
+}
+
+async function loadTimeSeries() {
+  const address = ensureAddress();
+  if (!address) return;
+  const data = await api("/api/timeseries", "POST", { address });
+  const dates = data.series.map(x => x.date);
+  const amounts = data.series.map(x => x.amount);
+  if (timeChart) timeChart.dispose();
+  timeChart = echarts.init(document.getElementById("timeChart"));
+  timeChart.setOption({
+    tooltip: { trigger: "axis" },
+    xAxis: { type: "category", data: dates },
+    yAxis: { type: "value", name: "Amount" },
+    series: [{ type: "line", data: amounts, smooth: true }]
+  });
+}
+
+async function loadGraph() {
+  const address = ensureAddress();
+  if (!address) return;
+  const data = await api("/api/graph", "POST", { address });
+  if (relationChart) relationChart.dispose();
+  relationChart = echarts.init(document.getElementById("relationGraph"));
+  relationChart.setOption({
+    tooltip: {},
+    legend: data.categories ? [{ data: data.categories.map(c => c.name) }] : [],
+    series: [{
+      type: "graph",
+      layout: "force",
+      roam: true,
+      data: data.nodes || [],
+      links: data.links || [],
+      categories: data.categories || [],
+      edgeSymbol: ["none", "arrow"],
+      force: { repulsion: 560, edgeLength: 130 },
+      lineStyle: { curveness: 0.18 },
+      label: { show: true, fontSize: 10 }
+    }]
+  });
+}
+
+window.addEventListener("resize", () => {
+  if (relationChart) relationChart.resize();
+  if (timeChart) timeChart.resize();
+});
+
+document.getElementById("profileBtn").onclick = loadProfile;
+document.getElementById("traceInBtn").onclick = () => trace("backward");
+document.getElementById("traceOutBtn").onclick = () => trace("forward");
+document.getElementById("clusterBtn").onclick = cluster;
+document.getElementById("timeBtn").onclick = loadTimeSeries;
+document.getElementById("graphBtn").onclick = loadGraph;
+document.getElementById("addressInput").value = localStorage.getItem("tracecoin_current_address") || "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe";
+</script>
+</body>
+</html>
