@@ -48,7 +48,7 @@
 
       <div class="table-responsive mt-3">
         <table class="table table-sm table-bordered table-striped">
-          <thead class="table-dark"><tr><th>ID</th><th>Hash</th><th>链上交易</th><th>风险</th><th>时间</th></tr></thead>
+          <thead class="table-dark"><tr><th>ID</th><th>地址</th><th>Hash</th><th>链上交易</th><th>风险</th><th>时间</th><th>操作</th></tr></thead>
           <tbody id="historyRows"></tbody>
         </table>
       </div>
@@ -62,21 +62,108 @@ let currentAnalyze = null;
 let currentTxs = [];
 let currentReportBlob = null;
 let currentReportHash = "";
+const pendingActions = new Set();
+let pdfFontBase64 = null;
+let pdfFontVfsName = "";
+let pdfFontLoadError = "";
 
 function isEvmAddress(v) { return /^0x[a-fA-F0-9]{40}$/.test(v || ""); }
 function shortHash(h) { return h ? `${h.slice(0, 10)}...${h.slice(-6)}` : "-"; }
 
-async function api(url, method = "GET", body = null) {
+async function api(url, method = "GET", body = null, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "请求失败");
-  return data;
+  opts.signal = controller.signal;
+  try {
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "请求失败");
+    return data;
+  } catch (err) {
+    if (err && err.name === "AbortError") throw new Error("请求超时，请检查网络后重试");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function showMessage(type, text) {
   document.getElementById("msg").innerHTML = `<div class='alert alert-${type}'>${text}</div>`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+async function ensurePdfFont(doc) {
+  const fallback = "helvetica";
+  const fontFamily = "TraceCoinCJK";
+  const fontSources = [
+    { url: "/assets/font/cjk", vfsName: "tracecoin-cjk.ttf" },
+    { url: "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf", vfsName: "NotoSansCJKsc-Regular.otf" },
+    { url: "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf", vfsName: "NotoSansCJKsc-Regular.otf" }
+  ];
+  try {
+    pdfFontLoadError = "";
+    if (!pdfFontBase64) {
+      let loaded = false;
+      const errors = [];
+      for (const src of fontSources) {
+        try {
+          const res = await fetch(src.url, { cache: "force-cache" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const buf = await res.arrayBuffer();
+          pdfFontBase64 = arrayBufferToBase64(buf);
+          pdfFontVfsName = src.vfsName;
+          loaded = true;
+          break;
+        } catch (e) {
+          errors.push(`${src.url} -> ${e.message || e}`);
+        }
+      }
+      if (!loaded) throw new Error(errors.join(" | "));
+    }
+    doc.addFileToVFS(pdfFontVfsName || "tracecoin-cjk.ttf", pdfFontBase64);
+    doc.addFont(pdfFontVfsName || "tracecoin-cjk.ttf", fontFamily, "normal");
+    doc.setFont(fontFamily, "normal");
+    return fontFamily;
+  } catch (e) {
+    pdfFontLoadError = e.message || "中文字体加载失败";
+    doc.setFont(fallback, "normal");
+    return fallback;
+  }
+}
+
+async function withButtonBusy(actionKey, buttonId, loadingText, fn) {
+  if (pendingActions.has(actionKey)) {
+    showMessage("warning", "已有同类请求正在进行，请稍候…");
+    return;
+  }
+  pendingActions.add(actionKey);
+  const btn = document.getElementById(buttonId);
+  const original = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${loadingText}`;
+  }
+  try {
+    await fn();
+  } finally {
+    pendingActions.delete(actionKey);
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
 }
 
 function loadFromLocalStorage() {
@@ -98,22 +185,25 @@ function loadFromLocalStorage() {
 }
 
 async function reloadAnalyzeFromServer() {
-  try {
-    const addr = document.getElementById("addressInput").value.trim();
-    if (!isEvmAddress(addr)) throw new Error("请输入合法 EVM 地址");
-    const data = await api("/api/analyze", "POST", { address: addr, limit: 80 });
-    currentAddress = data.address;
-    currentAnalyze = data;
-    currentTxs = data.txs || [];
-    localStorage.setItem("tracecoin_current_address", currentAddress);
-    localStorage.setItem("tracecoin_current_txs", JSON.stringify(currentTxs));
-    localStorage.setItem("tracecoin_current_analyze", JSON.stringify(currentAnalyze));
-    currentReportHash = "";
-    currentReportBlob = null;
-    showMessage("success", "已重新拉取分析数据");
-  } catch (e) {
-    showMessage("danger", e.message);
-  }
+  await withButtonBusy("reloadAnalyze", "reloadBtn", "拉取中", async () => {
+    try {
+      showMessage("info", "正在从链上和数据源拉取分析结果，请稍候…");
+      const addr = document.getElementById("addressInput").value.trim();
+      if (!isEvmAddress(addr)) throw new Error("请输入合法 EVM 地址");
+      const data = await api("/api/analyze", "POST", { address: addr, limit: 80 });
+      currentAddress = data.address;
+      currentAnalyze = data;
+      currentTxs = data.txs || [];
+      localStorage.setItem("tracecoin_current_address", currentAddress);
+      localStorage.setItem("tracecoin_current_txs", JSON.stringify(currentTxs));
+      localStorage.setItem("tracecoin_current_analyze", JSON.stringify(currentAnalyze));
+      currentReportHash = "";
+      currentReportBlob = null;
+      showMessage("success", "已重新拉取分析数据");
+    } catch (e) {
+      showMessage("danger", e.message);
+    }
+  });
 }
 
 async function sha256Blob(blob) {
@@ -124,107 +214,197 @@ async function sha256Blob(blob) {
 
 async function buildPdfBlob() {
   if (!currentAnalyze || !currentAddress) throw new Error("请先加载分析数据");
+  const [profileData, timeseriesData] = await Promise.all([
+    api("/api/profile", "POST", { address: currentAddress }),
+    api("/api/timeseries", "POST", { address: currentAddress })
+  ]);
+  const clustering = currentAnalyze.clustering || await api("/api/cluster", "POST", { address: currentAddress, limit: 80 });
+
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
+  const pdfFont = await ensurePdfFont(doc);
+  let y = 12;
   doc.setFontSize(14);
-  doc.text("TraceCoin Evidence Report", 10, 12);
+  doc.text("TraceCoin 交易分析与存证报告", 10, y);
+  y += 8;
   doc.setFontSize(10);
-  doc.text(`Address: ${currentAddress}`, 10, 20);
-  doc.text(`Risk: ${currentAnalyze.risk.level} (${currentAnalyze.risk.score})`, 10, 26);
-  doc.text(`Tx Count: ${currentTxs.length}`, 10, 32);
+  doc.text(`分析地址: ${currentAddress}`, 10, y); y += 6;
+  doc.text(`生成时间: ${new Date().toISOString()}`, 10, y); y += 6;
+  doc.text(`风险等级: ${currentAnalyze.risk.level} (${currentAnalyze.risk.score})`, 10, y); y += 6;
+  doc.text(`交易总数: ${currentTxs.length}`, 10, y); y += 8;
 
-  const rows = currentTxs.slice(0, 80).map(tx => [
+  doc.autoTable({
+    startY: y,
+    head: [["画像指标", "值"]],
+    body: [
+      ["交易总数", String(profileData.total_transactions ?? "-")],
+      ["ETH流入/流出", `${profileData.in_amount_eth ?? "-"} / ${profileData.out_amount_eth ?? "-"}`],
+      ["ETH累计金额", String(profileData.total_amount_eth ?? "-")],
+      ["唯一对手地址数", String(profileData.unique_counterparties ?? "-")],
+      ["活跃天数", String(profileData.active_days ?? "-")],
+      ["风险等级", `${profileData.risk_level ?? "-"} (${profileData.risk_score ?? "-"})`],
+      ["标签", (profileData.tags || []).join(", ") || "-"],
+      ["风险告警", (profileData.risk_alerts || []).join("; ") || "-"],
+    ],
+    styles: { fontSize: 8, font: pdfFont }
+  });
+
+  y = doc.lastAutoTable.finalY + 6;
+
+  const clusterRows = (clustering.clusters || []).map(c => [
+    c.cluster_id,
+    c.label,
+    String(c.size),
+    String(c.interaction_count),
+    String(c.interaction_volume_eth),
+    String(c.avg_tx_per_address ?? "-"),
+  ]);
+  if (!clusterRows.length) clusterRows.push(["-", "无聚类结果", "0", "0", "0", "-"]);
+  doc.autoTable({
+    startY: y,
+    head: [["簇ID", "标签", "地址数", "交互次数", "金额(ETH)", "人均笔数"]],
+    body: clusterRows,
+    styles: { fontSize: 8, font: pdfFont }
+  });
+
+  y = doc.lastAutoTable.finalY + 6;
+
+  const ethSeries = timeseriesData.series || [];
+  const tsRows = ethSeries.slice(-14).map(r => [r.date, String(r.amount), String(r.count)]);
+  if (!tsRows.length) tsRows.push(["-", "0", "0"]);
+  doc.autoTable({
+    startY: y,
+    head: [["时序日期(仅ETH)", "金额", "笔数"]],
+    body: tsRows,
+    styles: { fontSize: 8, font: pdfFont }
+  });
+
+  y = doc.lastAutoTable.finalY + 6;
+
+  const assetRows = Object.entries(timeseriesData.series_by_asset || {})
+    .map(([asset, series]) => [asset, String((series || []).length), String((series || []).reduce((s, x) => s + Number(x.amount || 0), 0).toFixed(6))])
+    .slice(0, 12);
+  if (!assetRows.length) assetRows.push(["-", "0", "0"]);
+  doc.autoTable({
+    startY: y,
+    head: [["资产", "时间点数", "累计金额"]],
+    body: assetRows,
+    styles: { fontSize: 8, font: pdfFont }
+  });
+
+  y = doc.lastAutoTable.finalY + 6;
+
+  const rows = currentTxs.slice(0, 100).map(tx => [
     shortHash(tx.hash),
     tx.time_text || "-",
     tx.direction,
     tx.counterparty || "-",
     String(tx.value_eth),
-    tx.asset_symbol || "ETH"
+    tx.asset_symbol || "ETH",
+    tx.asset_type || "native"
   ]);
+  if (!rows.length) rows.push(["-", "-", "-", "-", "0", "-", "-"]);
   doc.autoTable({
-    startY: 40,
-    head: [["Hash", "Time", "Dir", "Counterparty", "Amount", "Asset"]],
+    startY: y,
+    head: [["哈希", "时间", "方向", "对手地址", "金额", "资产", "类型"]],
     body: rows,
-    styles: { fontSize: 7 }
+    styles: { fontSize: 7, font: pdfFont }
   });
   return doc.output("blob");
 }
 
 async function generatePdf() {
-  try {
-    currentReportBlob = await buildPdfBlob();
-    currentReportHash = await sha256Blob(currentReportBlob);
-    document.getElementById("verifyHash").value = currentReportHash;
+  await withButtonBusy("generatePdf", "pdfBtn", "生成中", async () => {
+    try {
+      showMessage("info", "正在生成报告，请勿重复点击…");
+      currentReportBlob = await buildPdfBlob();
+      currentReportHash = await sha256Blob(currentReportBlob);
+      document.getElementById("verifyHash").value = currentReportHash;
 
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(currentReportBlob);
-    a.download = `Report_${currentAddress.slice(0, 10)}.pdf`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(currentReportBlob);
+      a.download = `Report_${currentAddress.slice(0, 10)}.pdf`;
+      a.click();
+      URL.revokeObjectURL(a.href);
 
-    showMessage("success", `PDF 已生成，Hash: <span class='mono'>${currentReportHash}</span>`);
-  } catch (e) {
-    showMessage("danger", e.message);
-  }
+      const fontHint = pdfFontLoadError ? `<br><small>提示：中文字体加载失败，部分中文可能显示不完整（${pdfFontLoadError}）</small>` : "";
+      showMessage("success", `PDF 已生成，Hash: <span class='mono'>${currentReportHash}</span>${fontHint}`);
+    } catch (e) {
+      showMessage("danger", e.message);
+    }
+  });
 }
 
 async function storeOnChain() {
-  try {
-    if (!currentAddress || !currentAnalyze) throw new Error("请先加载分析数据");
-    if (!currentReportBlob) currentReportBlob = await buildPdfBlob();
-    if (!currentReportHash) currentReportHash = await sha256Blob(currentReportBlob);
+  await withButtonBusy("storeOnChain", "storeBtn", "上链中", async () => {
+    try {
+      showMessage("info", "正在提交链上交易，请稍候（区块确认可能需要数秒）…");
+      if (!currentAddress || !currentAnalyze) throw new Error("请先加载分析数据");
+      if (!currentReportBlob) currentReportBlob = await buildPdfBlob();
+      if (!currentReportHash) currentReportHash = await sha256Blob(currentReportBlob);
 
-    const chain = await api("/api/evidence/store_onchain", "POST", { address: currentAddress, report_hash: currentReportHash });
-    await api("/api/evidence/register", "POST", {
-      address: currentAddress,
-      report_hash: currentReportHash,
-      tx_count: currentTxs.length,
-      risk_score: currentAnalyze.risk.score,
-      risk_level: currentAnalyze.risk.level,
-      chain_tx_hash: chain.tx_hash,
-      note: "pdf-report"
-    });
+      const chain = await api("/api/evidence/store_onchain", "POST", {
+        address: currentAddress,
+        report_hash: currentReportHash,
+        auto_register: true,
+        tx_count: currentTxs.length,
+        risk_score: currentAnalyze.risk.score,
+        risk_level: currentAnalyze.risk.level,
+        note: "pdf-report"
+      }, 60000);
 
-    document.getElementById("verifyHash").value = currentReportHash;
-    showMessage("success", `上链成功，链上交易 Hash: <span class='mono'>${chain.tx_hash}</span>`);
-  } catch (e) {
-    showMessage("danger", e.message);
-  }
+      document.getElementById("verifyHash").value = currentReportHash;
+      await loadHistory(true);
+      showMessage("success", `上链成功，链上交易 Hash: <span class='mono'>${chain.tx_hash}</span>，历史已自动更新`);
+    } catch (e) {
+      showMessage("danger", e.message);
+    }
+  });
 }
 
 async function verifyEvidence() {
-  try {
-    const address = (document.getElementById("addressInput").value || currentAddress).trim();
-    const hash = document.getElementById("verifyHash").value.trim().toLowerCase();
-    if (!isEvmAddress(address)) throw new Error("请输入合法地址");
-    if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error("请输入 64 位 SHA-256 Hash");
+  await withButtonBusy("verifyEvidence", "verifyBtn", "验真中", async () => {
+    try {
+      const address = (document.getElementById("addressInput").value || currentAddress).trim();
+      const hash = document.getElementById("verifyHash").value.trim().toLowerCase();
+      if (!isEvmAddress(address)) throw new Error("请输入合法地址");
+      if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error("请输入 64 位 SHA-256 Hash");
 
-    const data = await api("/api/evidence/verify", "POST", { address, report_hash: hash });
-    if (data.is_valid) {
-      showMessage("success", `验真通过：DB=${data.db_match}，CHAIN=${data.chain_match}`);
-    } else {
-      showMessage("warning", "验真未通过：未匹配到存证记录");
+      const data = await api("/api/evidence/verify", "POST", { address, report_hash: hash });
+      if (data.is_valid) {
+        showMessage("success", `验真通过：DB=${data.db_match}，CHAIN=${data.chain_match}`);
+      } else {
+        showMessage("warning", "验真未通过：未匹配到存证记录");
+      }
+    } catch (e) {
+      showMessage("danger", e.message);
     }
-  } catch (e) {
-    showMessage("danger", e.message);
-  }
+  });
 }
 
-async function loadHistory() {
+async function loadHistory(skipBusy = false) {
+  if (!skipBusy) {
+    return withButtonBusy("loadHistory", "historyBtn", "加载中", () => loadHistory(true));
+  }
   try {
     const address = (document.getElementById("addressInput").value || currentAddress).trim();
     if (!isEvmAddress(address)) throw new Error("请输入合法地址");
-    const data = await api(`/api/evidence/history/${address}`, "GET");
+    showMessage("info", "正在加载历史存证并尝试链上补齐，请稍候…");
+    const data = await api(`/api/evidence/history/${address}?include_chain=1`, "GET");
 
     const tbody = document.getElementById("historyRows");
     tbody.innerHTML = "";
     data.history.forEach(row => {
+      const rowAddr = row.address || data.address || address;
+      const analyzeUrl = `/page/analyze?address=${encodeURIComponent(rowAddr)}`;
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${row.id}</td><td class='mono'>${shortHash(row.report_hash)}</td><td class='mono'>${shortHash(row.chain_tx_hash || "")}</td><td>${row.risk_level}(${row.risk_score})</td><td>${row.created_at}</td>`;
+      tr.innerHTML = `<td>${row.id}</td><td class='mono'>${shortHash(rowAddr)}</td><td class='mono'>${shortHash(row.report_hash)}</td><td class='mono'>${shortHash(row.chain_tx_hash || "")}</td><td>${row.risk_level}(${row.risk_score})</td><td>${row.created_at}</td><td><a class='btn btn-sm btn-outline-primary' href='${analyzeUrl}' target='_blank'>分析该地址</a></td>`;
       tbody.appendChild(tr);
     });
 
-    showMessage("info", `已加载 ${data.history.length} 条存证历史`);
+    const syncHint = data.synced_from_chain ? `（已从链上补齐 ${data.synced_from_chain} 条）` : "";
+    const chainHint = data.chain_error ? `；链上同步失败：${data.chain_error}` : "";
+    showMessage("info", `已加载 ${data.history.length} 条存证历史${syncHint}${chainHint}`);
   } catch (e) {
     showMessage("danger", e.message);
   }
@@ -238,7 +418,11 @@ document.getElementById("verifyBtn").onclick = verifyEvidence;
 document.getElementById("historyBtn").onclick = loadHistory;
 
 const latestAddress = localStorage.getItem("tracecoin_current_address") || "";
-if (latestAddress) document.getElementById("addressInput").value = latestAddress;
+if (latestAddress) {
+  currentAddress = latestAddress;
+  document.getElementById("addressInput").value = latestAddress;
+  loadHistory().catch(() => {});
+}
 </script>
 </body>
 </html>

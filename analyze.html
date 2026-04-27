@@ -103,21 +103,59 @@ let currentAnalyze = null;
 let mainChart = null;
 let timeChart = null;
 let currentPeerClusterMap = {};
+const pendingActions = new Set();
 
 function isEvmAddress(v) {
   return /^0x[a-fA-F0-9]{40}$/.test(v || "");
 }
 
-async function api(url, method = "GET", body = null) {
+async function api(url, method = "GET", body = null, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "请求失败");
-  return data;
+  opts.signal = controller.signal;
+  try {
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "请求失败");
+    return data;
+  } catch (err) {
+    if (err && err.name === "AbortError") throw new Error("请求超时，请检查网络后重试");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function shortHash(h) { return h ? `${h.slice(0, 10)}...${h.slice(-6)}` : "-"; }
+
+function setAlert(type, text) {
+  document.getElementById("queryAlert").innerHTML = `<div class='alert alert-${type} mb-2'>${text}</div>`;
+}
+
+async function withButtonBusy(actionKey, buttonId, loadingText, fn) {
+  if (pendingActions.has(actionKey)) {
+    setAlert("warning", "已有同类请求正在处理，请稍候…");
+    return;
+  }
+  pendingActions.add(actionKey);
+  const btn = document.getElementById(buttonId);
+  const original = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${loadingText}`;
+  }
+  try {
+    await fn();
+  } finally {
+    pendingActions.delete(actionKey);
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+}
 
 function setRisk(level, score) {
   const el = document.getElementById("riskLevel");
@@ -195,13 +233,18 @@ function saveCurrentToLocal() {
 }
 
 async function queryAnalyze(addressOverride = null) {
+  return withButtonBusy("queryAnalyze", "queryBtn", "查询中", () => queryAnalyzeCore(addressOverride));
+}
+
+async function queryAnalyzeCore(addressOverride = null) {
   const address = addressOverride || document.getElementById("addressInput").value.trim();
   const limit = Number(document.getElementById("limitInput").value || 50);
   if (!isEvmAddress(address)) {
-    document.getElementById("queryAlert").innerHTML = "<div class='alert alert-warning'>请输入合法 EVM 地址</div>";
+    setAlert("warning", "请输入合法 EVM 地址");
     return;
   }
   try {
+    setAlert("info", "正在拉取并分析交易数据，请勿重复点击…");
     const q = await api("/api/query", "POST", { address, limit });
     const a = await api("/api/analyze", "POST", { address, limit });
     currentAddress = q.address;
@@ -213,17 +256,22 @@ async function queryAnalyze(addressOverride = null) {
     document.getElementById("riskAlerts").textContent = a.risk.alerts.length ? `预警：${a.risk.alerts.join("；")}` : "预警：暂无";
     renderTxRows(currentTxs);
     renderGraph(a.graph);
-    document.getElementById("queryAlert").innerHTML = `<div class='alert alert-success'>查询成功：${currentTxs.length} 条交易，${q.counterparty_count} 个对手地址</div>`;
+    setAlert("success", `查询成功：${currentTxs.length} 条交易，${q.counterparty_count} 个对手地址`);
     saveCurrentToLocal();
   } catch (e) {
-    document.getElementById("queryAlert").innerHTML = `<div class='alert alert-danger'>${e.message}</div>`;
+    setAlert("danger", e.message);
   }
 }
 
 async function loadProfile() {
+  return withButtonBusy("profile", "profileBtn", "加载中", loadProfileCore);
+}
+
+async function loadProfileCore() {
   const address = getAddressOrCurrent();
   if (!isEvmAddress(address)) return alert("请先输入合法地址");
   try {
+    setAlert("info", "正在加载地址画像…");
     const data = await api("/api/profile", "POST", { address });
     document.getElementById("profileResult").innerHTML = `
       <div class='small'>
@@ -242,9 +290,16 @@ async function loadProfile() {
 }
 
 async function trace(direction) {
+  const key = direction === "forward" ? "traceOut" : "traceIn";
+  const btn = direction === "forward" ? "traceOutBtn" : "traceInBtn";
+  return withButtonBusy(key, btn, "追踪中", () => traceCore(direction));
+}
+
+async function traceCore(direction) {
   const address = getAddressOrCurrent();
   if (!isEvmAddress(address)) return alert("请先输入合法地址");
   try {
+    setAlert("info", `正在执行${direction === "forward" ? "流出" : "流入"}追踪…`);
     const data = await api("/api/trace", "POST", { address, direction });
     let html = "<ul class='small'>";
     data.paths.forEach(p => html += `<li class='mono'>${p.from} -> ${p.to}，${p.amount_eth}，${p.tx_count} 笔</li>`);
@@ -256,9 +311,14 @@ async function trace(direction) {
 }
 
 async function cluster() {
+  return withButtonBusy("cluster", "clusterBtn", "聚类中", clusterCore);
+}
+
+async function clusterCore() {
   const address = getAddressOrCurrent();
   if (!isEvmAddress(address)) return alert("请先输入合法地址");
   try {
+    setAlert("info", "正在执行地址聚类分析…");
     const limit = Number(document.getElementById("limitInput").value || 50);
     const data = await api("/api/cluster", "POST", { address, limit });
     if (!data.clusters || !data.clusters.length) {
@@ -275,9 +335,14 @@ async function cluster() {
 }
 
 async function loadTimeSeries() {
+  return withButtonBusy("timeseries", "timeBtn", "分析中", loadTimeSeriesCore);
+}
+
+async function loadTimeSeriesCore() {
   const address = getAddressOrCurrent();
   if (!isEvmAddress(address)) return alert("请先输入合法地址");
   try {
+    setAlert("info", "正在加载时序分析…");
     const data = await api("/api/timeseries", "POST", { address });
     const dates = data.series.map(x => x.date);
     const amounts = data.series.map(x => x.amount);
@@ -294,6 +359,14 @@ async function loadTimeSeries() {
   }
 }
 
+async function initFromQueryParam() {
+  const params = new URLSearchParams(window.location.search);
+  const address = (params.get("address") || "").trim();
+  if (!isEvmAddress(address)) return;
+  document.getElementById("addressInput").value = address;
+  await queryAnalyze(address);
+}
+
 window.addEventListener("resize", () => {
   if (mainChart) mainChart.resize();
   if (timeChart) timeChart.resize();
@@ -306,6 +379,7 @@ document.getElementById("traceOutBtn").onclick = () => trace("forward");
 document.getElementById("clusterBtn").onclick = cluster;
 document.getElementById("timeBtn").onclick = loadTimeSeries;
 document.getElementById("addressInput").value = "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe";
+initFromQueryParam().catch(() => {});
 </script>
 </body>
 </html>

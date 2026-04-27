@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 try:
@@ -86,6 +86,14 @@ CORS(app)
 
 UI_PAGES = {"index.html", "analyze.html", "batch.html", "insight.html", "evidence.html"}
 
+PDF_FONT_CANDIDATES = [
+    # Optional project-local font override:
+    # put a TTF font at ./assets/fonts/cjk.ttf for stable offline PDF rendering.
+    BASE_DIR / "assets" / "fonts" / "cjk.ttf",
+    # Windows common CJK fonts.
+    Path(r"C:\Windows\Fonts\simhei.ttf"),
+]
+
 # 演示缓存：用于导出、批量复制、聚类与最新交易检测
 cache: dict[str, Any] = {
     "address": None,
@@ -127,6 +135,15 @@ def init_db() -> None:
                 note TEXT,
                 created_at TEXT NOT NULL
             )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_address_id ON evidence_records(address, id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_addr_hash ON evidence_records(address, report_hash)")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_chain_tx
+            ON evidence_records(chain_tx_hash)
+            WHERE chain_tx_hash IS NOT NULL
             """
         )
         conn.execute(
@@ -192,6 +209,19 @@ def parse_int(value: Any, default: int = 0) -> int:
         return int(str(value))
     except Exception:
         return default
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def vec_mean(values: list[float]) -> float:
@@ -898,6 +928,101 @@ def evidence_from_block_number(block_number: int) -> dict[str, Any]:
     return {"block_number": int(block_number), "count": len(rows), "records": rows}
 
 
+def save_evidence_record(
+    address: str,
+    report_hash: str,
+    tx_count: int = 0,
+    risk_score: int = 0,
+    risk_level: str = "LOW",
+    chain_tx_hash: str | None = None,
+    note: str = "",
+    chain_status: str | None = None,
+    created_at: str | None = None,
+) -> tuple[int, bool]:
+    chain_tx_hash = (str(chain_tx_hash).strip() or None) if chain_tx_hash is not None else None
+    chain_status = chain_status or ("SUCCESS" if chain_tx_hash else "SKIPPED")
+    created_at = created_at or utc_now_iso()
+    risk_level = (risk_level or "LOW").upper()
+
+    conn = db_conn()
+    try:
+        existing = conn.execute(
+            """
+            SELECT id, chain_tx_hash FROM evidence_records
+            WHERE address = ? AND report_hash = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (address, report_hash),
+        ).fetchone()
+        if existing:
+            existing_id = int(existing["id"])
+            existing_chain_tx = existing["chain_tx_hash"]
+            if chain_tx_hash and not existing_chain_tx:
+                conn.execute(
+                    """
+                    UPDATE evidence_records
+                    SET chain_status = ?, chain_tx_hash = ?, note = ?, tx_count = ?, risk_score = ?, risk_level = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        "SUCCESS",
+                        chain_tx_hash,
+                        note or "pdf-report",
+                        tx_count,
+                        risk_score,
+                        risk_level,
+                        existing_id,
+                    ),
+                )
+                conn.commit()
+            return existing_id, False
+
+        cur = conn.execute(
+            """
+            INSERT INTO evidence_records
+            (address, report_hash, tx_count, risk_score, risk_level, chain_status, chain_tx_hash, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                address,
+                report_hash,
+                tx_count,
+                risk_score,
+                risk_level,
+                chain_status,
+                chain_tx_hash,
+                note,
+                created_at,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid), True
+    finally:
+        conn.close()
+
+
+def sync_chain_history_to_db(address: str, chain_rows: list[dict[str, Any]]) -> int:
+    imported = 0
+    for row in chain_rows:
+        report_hash = str(row.get("hash", "")).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", report_hash):
+            continue
+        _, created = save_evidence_record(
+            address=address,
+            report_hash=report_hash,
+            tx_count=0,
+            risk_score=0,
+            risk_level="UNKNOWN",
+            chain_tx_hash=None,
+            note="synced-from-chain",
+            chain_status="CHAIN_ONLY",
+            created_at=str(row.get("datetime") or utc_now_iso()),
+        )
+        if created:
+            imported += 1
+    return imported
+
+
 @app.errorhandler(ValidationError)
 def on_validation_error(err: ValidationError):
     return jsonify({"error": str(err)}), 400
@@ -923,6 +1048,23 @@ def page(name: str):
     if filename not in UI_PAGES:
         abort(404)
     return send_from_directory(".", filename)
+
+
+@app.route("/assets/font/cjk", methods=["GET"])
+def cjk_font():
+    env_path = str(os.getenv("TRACECOIN_PDF_FONT_PATH", "")).strip()
+    candidates = list(PDF_FONT_CANDIDATES)
+    if env_path:
+        candidates.insert(0, Path(env_path))
+
+    for path in candidates:
+        try:
+            if path and path.exists() and path.is_file():
+                return send_file(path, mimetype="font/ttf", conditional=True, max_age=86400)
+        except Exception:
+            continue
+
+    return jsonify({"error": "cjk font file not found"}), 404
 
 
 @app.route("/api/health", methods=["GET"])
@@ -1114,8 +1256,31 @@ def evidence_store_onchain_api():
         raise ValidationError("report_hash must be 64-char sha256 hex")
 
     tx_hash = store_evidence_onchain(address, report_hash)
+    auto_register = parse_bool(body.get("auto_register", True), True)
+    record_id = None
+    record_created = False
+    if auto_register:
+        record_id, record_created = save_evidence_record(
+            address=address,
+            report_hash=report_hash,
+            tx_count=parse_int(body.get("tx_count", 0), 0),
+            risk_score=parse_int(body.get("risk_score", 0), 0),
+            risk_level=str(body.get("risk_level", "LOW")),
+            chain_tx_hash=tx_hash,
+            note=str(body.get("note", "pdf-report")).strip(),
+            chain_status="SUCCESS",
+        )
     write_audit("store_onchain", address, {"report_hash": report_hash, "tx_hash": tx_hash})
-    return jsonify({"address": address, "report_hash": report_hash, "tx_hash": tx_hash})
+    return jsonify(
+        {
+            "address": address,
+            "report_hash": report_hash,
+            "tx_hash": tx_hash,
+            "record_id": record_id,
+            "record_created": record_created,
+            "auto_register": auto_register,
+        }
+    )
 
 
 @app.route("/api/evidence/from_tx", methods=["POST"])
@@ -1153,43 +1318,30 @@ def register_evidence():
     if not re.fullmatch(r"[0-9a-f]{64}", report_hash):
         raise ValidationError("report_hash must be 64-char sha256 hex")
 
-    tx_count = int(body.get("tx_count", 0))
-    risk_score = int(body.get("risk_score", 0))
+    tx_count = parse_int(body.get("tx_count", 0), 0)
+    risk_score = parse_int(body.get("risk_score", 0), 0)
     risk_level = str(body.get("risk_level", "LOW")).upper()
     chain_tx_hash = body.get("chain_tx_hash") or None
 
-    conn = db_conn()
-    try:
-        cur = conn.execute(
-            """
-            INSERT INTO evidence_records
-            (address, report_hash, tx_count, risk_score, risk_level, chain_status, chain_tx_hash, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                address,
-                report_hash,
-                tx_count,
-                risk_score,
-                risk_level,
-                "SUCCESS" if chain_tx_hash else "SKIPPED",
-                chain_tx_hash,
-                str(body.get("note", "")).strip(),
-                utc_now_iso(),
-            ),
-        )
-        conn.commit()
-        evidence_id = cur.lastrowid
-    finally:
-        conn.close()
+    evidence_id, created = save_evidence_record(
+        address=address,
+        report_hash=report_hash,
+        tx_count=tx_count,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        chain_tx_hash=chain_tx_hash,
+        note=str(body.get("note", "")).strip(),
+        chain_status="SUCCESS" if chain_tx_hash else "SKIPPED",
+    )
 
-    write_audit("register_evidence", address, {"id": evidence_id})
+    write_audit("register_evidence", address, {"id": evidence_id, "created": created})
     return jsonify(
         {
             "id": evidence_id,
             "address": address,
             "report_hash": report_hash,
             "chain_tx_hash": chain_tx_hash,
+            "created": created,
         }
     )
 
@@ -1245,20 +1397,39 @@ def verify_evidence():
 @app.route("/api/evidence/history/<address>", methods=["GET"])
 def history(address: str):
     address = normalize_address(address)
+    include_chain = parse_bool(request.args.get("include_chain", "1"), True)
+    synced_count = 0
+    chain_error = None
+    if include_chain:
+        try:
+            chain_rows = read_chain_evidences(address)
+            synced_count = sync_chain_history_to_db(address, chain_rows)
+        except Exception as e:
+            chain_error = str(e)
+
     conn = db_conn()
     try:
         rows = conn.execute(
             """
-            SELECT id, report_hash, tx_count, risk_score, risk_level, chain_status, chain_tx_hash, note, created_at
-            FROM evidence_records WHERE address = ? ORDER BY id DESC LIMIT 50
+            SELECT id, address, report_hash, tx_count, risk_score, risk_level, chain_status, chain_tx_hash, note, created_at
+            FROM evidence_records WHERE address = ? ORDER BY id DESC LIMIT 100
             """,
             (address,),
         ).fetchall()
     finally:
         conn.close()
-    return jsonify({"address": address, "history": [dict(r) for r in rows]})
+    return jsonify(
+        {
+            "address": address,
+            "history": [dict(r) for r in rows],
+            "synced_from_chain": synced_count,
+            "chain_error": chain_error,
+        }
+    )
+
+
+init_db()
 
 
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=5000, debug=True)

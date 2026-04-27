@@ -1,141 +1,499 @@
-﻿基于区块链的虚拟货币溯源及存证系统设计与实现
+﻿# 基于区块链的虚拟货币溯源及存证系统设计与实现（修订稿）
 
-摘要
-针对虚拟货币交易中匿名性强、跨地址流转复杂、证据留存与复核成本高的问题，本文设计并实现了一套面向监管辅助场景的“交易溯源—风险识别—报告固化—链上验真”闭环系统。系统以 Flask 为后端框架，结合 Etherscan 数据接口、ECharts 可视化、Ganache 本地链与 Solidity 智能合约，实现了交易全流程查询、关系图谱分析、地址画像、异常预警、PDF 报告生成与区块链存证。与早期仅抓取普通交易的方案相比，本文将 native、internal、erc20 三类交易统一接入并标准化处理，显著提升了交易视图完整性。系统还通过“分析页整合子功能+图谱节点点击钻取”优化交互路径，支持研究人员在同一页面完成追踪、聚类、画像与时序分析。实验与演示结果表明，该系统能够稳定支持本科毕业设计场景下的功能验证与工程展示。
+## 第三章 系统需求分析
 
-关键词
-区块链；虚拟货币；交易溯源；地址聚类；风险评估；电子存证
+### 3.1 功能需求
+系统需要支持以下核心功能：
+1. **交易数据采集与统一建模**：同时接入 `native`、`internal`、`erc20` 三类交易。
+2. **交易关系可视化分析**：构建地址关系图谱，支持节点点击钻取。
+3. **地址风险评估**：输出风险分值、风险等级和告警项。
+4. **地址聚类分析**：输出簇标签、簇内规模、交互强度。
+5. **一跳资金追踪**：按流入/流出方向追踪直接对手地址。
+6. **地址画像分析**：输出交易活跃度、对手分布、资产构成。
+7. **时序分析**：按日期统计 ETH 主序列和分币种序列。
+8. **报告生成与存证**：生成 PDF 报告，计算哈希并上链存证。
+9. **存证验真与历史查询**：按地址、交易哈希、区块号反查存证。
 
-第1章 绪论
-1.1 研究背景
-虚拟货币交易在跨平台、跨地域场景中呈现高频与碎片化特征，传统人工排查很难快速还原资金链路。尤其在执法取证阶段，若缺少可复核、可追溯、可校验的证据链，后续问责与审计效率会显著下降。因此，构建“分析结果可解释、报告内容可验真、证据链条可追责”的系统具有现实价值。
+### 3.2 非功能需求
+1. **可靠性**
+   - 第三方接口异常时系统需给出可解释错误，不可无响应。
+   - 链上写入需检查 `receipt.status`，失败必须回滚业务状态。
+2. **性能**
+   - 单地址分析响应时间控制在可交互范围（演示环境通常 < 5 秒，受外部 API 波动影响）。
+   - 前端图谱渲染支持中等规模节点集的流畅交互。
+3. **安全性**
+   - 私钥通过环境变量管理，不写入源码。
+   - 所有输入地址、哈希、区块号必须做格式校验。
+   - 仅上链哈希，不上链原始 PDF 内容，减少隐私泄露。
+4. **可维护性**
+   - 后端按“数据采集-分析-存证”模块化拆分函数。
+   - 页面按功能分离，主分析页整合子功能，降低跳转复杂度。
+5. **可扩展性**
+   - 可新增链种或数据源（替换 `etherscan_request` 层）。
+   - 可替换风险规则为机器学习模型。
+6. **可审计性**
+   - 本地 SQLite 保留证据记录与审计日志，支持链上链下双通道核验。
 
-1.2 研究目标
-本文目标是实现一个可运行、可演示、可答辩的完整原型系统，具体包括：
-（1）完整交易数据获取与统一建模；
-（2）地址风险评估与聚类识别；
-（3）分析报告 PDF 生成；
-（4）报告哈希链上存证与链上链下双通道验真。
+---
 
-第2章 关键技术基础
-2.1 区块链与智能合约
-系统采用 Solidity 编写 TraceCoin 合约，核心方法为 storeEvidence 与 getEvidences。合约只保存报告文件哈希，不存储 PDF 原文，既降低链上成本，也避免泄露敏感数据。
+## 第四章 系统总体设计
 
-2.2 Web3 与本地链环境
-系统在 Ganache 上部署合约，后端通过 web3.py 调用合约读写接口。链上写入后返回交易哈希，后续可用于按交易追溯和按区块检索。
+### 4.1 系统总体架构图
+```mermaid
+flowchart TB
+    A[前端页面 index/analyze/batch/evidence] --> B[Flask API 层]
+    B --> C[业务分析 统一建模 风险 聚类 追踪 画像 时序]
+    B --> D[SQLite 证据表+审计日志]
+    B --> E[Etherscan API txlist txlistinternal tokentx]
+    B --> F[Web3 + TraceCoin 合约 storeEvidence/getEvidences]
+```
 
-2.3 可视化与交互
-前端使用 ECharts 绘制关系图谱与时序图。关系图谱支持节点点击事件，点击对手地址后自动触发该地址的新一轮分析，实现“可视化即入口”的钻取式分析流程。
+### 4.2 关键流程图（分析与存证闭环）
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant FE as 前端
+    participant BE as Flask后端
+    participant ES as Etherscan
+    participant BC as 区块链合约
 
-第3章 系统需求分析
-3.1 功能需求
-系统应具备交易查询、风险评估、地址聚类、一跳追踪、地址画像、时序分析、PDF 报告生成、链上存证、存证验真、历史查询等功能。
+    U->>FE: 输入地址并点击分析
+    FE->>BE: /api/analyze
+    BE->>ES: 拉取三类交易
+    ES-->>BE: native/internal/erc20
+    BE->>BE: 标准化+风险+聚类+图谱
+    BE-->>FE: 分析结果
 
-3.2 非功能需求
-系统应具备输入校验、异常处理、可维护性和可扩展性；密钥通过环境变量管理；数据库与链上数据保持可审计一致性。
+    U->>FE: 生成PDF并发起存证
+    FE->>FE: 计算SHA-256
+    FE->>BE: /api/evidence/store_onchain
+    BE->>BC: storeEvidence(address, hash)
+    BC-->>BE: txHash
+    BE-->>FE: 存证成功
+```
 
-第4章 系统总体设计
-4.1 架构设计
-系统采用“应用层—业务层—区块链层”三层架构。
-应用层：多页面前端与可视化交互。
-业务层：交易抓取、标准化、评估与聚类、报告生成逻辑。
-区块链层：报告哈希固化与链上验证。
+### 4.3 数据模型说明表
+| 数据对象 | 关键字段 | 说明 |
+|---|---|---|
+| 标准交易对象 | hash, from, to, direction, counterparty, value_eth, asset_symbol, asset_type, fee_eth, time_text | 三类交易统一后的公共结构 |
+| 聚类结果 | cluster_id, label, size, interaction_count, avg_tx_per_address | 地址分簇及可解释指标 |
+| 风险结果 | score, level, alerts | 风险评分与告警项 |
+| 存证记录 | address, report_hash, chain_tx_hash, created_at | 报告哈希上链与本地登记 |
 
-4.2 页面与交互设计
-当前系统将“分析页”作为主页面，整合地址查询、关系图谱、追踪、聚类、画像、时序等子功能；批量查询和存证功能分配独立页面。
+---
 
-第5章 核心功能实现
-5.1 交易数据获取与标准化
-5.1.1 三类交易定义
-native：主币交易（ETH），来自普通交易列表 txlist。
-internal：合约内部转账，来自 txlistinternal。
-erc20：代币转账，来自 tokentx，金额按 tokenDecimal 换算。
+## 第五章 系统实现
 
-5.1.2 获取策略
-后端分别抓取三类交易后合并、去重、按时间排序，统一映射为标准字段：from、to、direction、counterparty、value_eth、asset_symbol、asset_type、fee_eth、time_text。
-该设计解决了“只看到流入、金额大量为0”的问题。
+### 5.1 三类交易统一处理（重点）
 
-5.2 风险评估模型
-风险评估基于规则打分，主要考虑以下因素：
-（1）短期交易频次是否过高；
-（2）对手地址分散度是否异常；
-（3）是否存在大额单笔；
-（4）是否存在明显单向外流；
-（5）是否命中黑名单；
-（6）累计交易规模是否过大。
-最终输出 score、level（LOW/MEDIUM/HIGH）和 alerts。
+#### 5.1.1 功能讲解
+系统不是只抓普通交易，而是把三类交易统一接入：
+- `native`：普通主币交易（`txlist`）
+- `internal`：内部交易（`txlistinternal`）
+- `erc20`：代币交易（`tokentx`）
 
-5.3 地址聚类模型
-聚类对象为“目标地址的直接对手地址”。特征包括：
-avg_fee_eth、total_fee_eth、tx_count、fee_std_eth、in_ratio、out_ratio。
-在依赖可用时使用 StandardScaler + KMeans；依赖缺失时使用规则兜底。
+统一策略如下：
+1. 分源抓取；
+2. 映射统一字段（含 `asset_symbol`、`asset_type`）；
+3. ERC20 用 `tokenDecimal` 换算真实金额；
+4. 按 `asset_type + hash + trace_id` 去重；
+5. 排序并进入后续分析流程。
 
-为解决“图谱颜色与聚类结果不一致、某一簇过度聚集”的问题，系统在簇标签映射中采用簇内人均指标：
-avg_tx_per_address、avg_volume_per_address_eth、avg_fee_eth，避免仅用簇总量阈值导致偏差。
+#### 5.1.2 对应代码
+```python
+# app.py
 
-5.4 一跳追踪与地址画像
-一跳追踪：仅统计目标地址与其直接相邻地址的资金往来路径，不进行多跳扩散。适用于快速识别主要对手。
-地址画像：对地址进行结构化刻画，输出交易规模、流入流出、对手数量、活跃天数、风险标签与资产构成。
+def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
+    normal_rows = etherscan_request("txlist", address, limit)
+    internal_rows = etherscan_request("txlistinternal", address, limit)
+    token_rows = etherscan_request("tokentx", address, limit)
 
-5.5 分析页整合子功能
-分析页面包含：关系图谱、地址画像、一跳追踪、聚类结果、时序图和交易明细。
-关系图谱支持“点击对手地址节点即触发对该地址的溯源分析”。
-交易表支持按簇风险类型进行颜色标注，辅助人工快速识别问题地址。
+    merged: list[dict[str, Any]] = []
 
-5.6 时序分析口径说明
-此前“amount 直接混加不同币种”会引发统计口径问题。当前改为：
-series：仅统计 ETH（native + internal）每日金额与笔数；
-series_by_asset：按币种分别统计各自 amount 与 count。
-因此，时序图主曲线表示 ETH 口径，分币种结果用于补充解释。
+    for row in normal_rows:
+        merged.append({
+            "hash": row.get("hash", ""),
+            "from": row.get("from", ""),
+            "to": row.get("to", ""),
+            "value": row.get("value", "0"),
+            "gasPrice": row.get("gasPrice", "0"),
+            "gasUsed": row.get("gasUsed", "0"),
+            "timeStamp": row.get("timeStamp", "0"),
+            "asset_symbol": "ETH",
+            "asset_type": "native",
+            "trace_id": row.get("transactionIndex", ""),
+        })
 
-5.7 报告生成与导出策略
-系统保留 PDF 报告导出，移除 CSV 导出，避免两者在答辩展示中重复。PDF 报告包含地址、风险等级、关键统计与交易表，便于归档与复核。
+    for row in internal_rows:
+        merged.append({
+            "hash": row.get("hash", ""),
+            "from": row.get("from", ""),
+            "to": row.get("to", ""),
+            "value": row.get("value", "0"),
+            "gasPrice": "0",
+            "gasUsed": "0",
+            "timeStamp": row.get("timeStamp", "0"),
+            "asset_symbol": "ETH",
+            "asset_type": "internal",
+            "trace_id": row.get("traceId", ""),
+        })
 
-5.8 区块链存证与验真
-5.8.1 存证流程
-（1）前端生成 PDF；
-（2）计算 PDF 的 SHA-256 哈希；
-（3）调用合约 storeEvidence(target, hash) 上链；
-（4）后端登记本地记录（地址、哈希、风险、链上 tx 哈希）。
+    for row in token_rows:
+        amount = parse_amount(row.get("value", "0"), row.get("tokenDecimal", "18"))
+        merged.append({
+            "hash": row.get("hash", ""),
+            "from": row.get("from", ""),
+            "to": row.get("to", ""),
+            "value": str(amount),
+            "gasPrice": row.get("gasPrice", "0"),
+            "gasUsed": row.get("gasUsed", "0"),
+            "timeStamp": row.get("timeStamp", "0"),
+            "asset_symbol": row.get("tokenSymbol", "TOKEN"),
+            "asset_type": "erc20",
+            "trace_id": row.get("logIndex", ""),
+        })
 
-5.8.2 如何从链上获取 PDF 哈希
-方式一：按地址读取合约状态
-调用 getEvidences(address) 可直接读取已存证 hash 列表（可在 Remix 或后端接口中调用）。
+    seen = set()
+    deduped = []
+    for row in merged:
+        key = f"{row.get('asset_type')}:{row.get('hash')}:{row.get('trace_id')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
 
-方式二：按交易哈希反解
-读取交易 input，并按合约 ABI 解码 storeEvidence 的参数，得到 _hash。
+    deduped.sort(key=lambda x: parse_int(x.get("timeStamp", "0")), reverse=True)
+    return deduped
+```
 
-方式三：按区块扫描反解
-遍历区块内发往目标合约的交易，解码所有 storeEvidence 调用，提取每条 hash。
+```python
+# app.py
 
-5.8.3 验真逻辑
-将待验证文件重新计算 SHA-256，与链上记录和本地记录双向比对，输出是否有效。
+def compact_txs(txs: list[dict[str, Any]], target_address: str | None = None) -> list[dict[str, Any]]:
+    output = []
+    target = target_address.lower() if target_address else None
+    for tx in txs:
+        src = str(tx.get("from", "")).lower()
+        dst = str(tx.get("to", "")).lower()
+        asset_type = str(tx.get("asset_type", "native"))
+        asset_symbol = str(tx.get("asset_symbol", "ETH") or "ETH").upper()
+        raw_value = tx.get("value", "0")
 
-第6章 系统部署与运行
-6.1 Ganache
-启动本地链，确认 RPC 地址（如 http://127.0.0.1:7545）。
+        if asset_type == "erc20":
+            amount = float(raw_value) if isinstance(raw_value, (int, float)) else float(str(raw_value or "0"))
+            value_wei = "0"
+        else:
+            amount = parse_eth(raw_value)
+            value_wei = raw_value
 
-6.2 Remix
-编译并部署 TraceCoin 合约，记录合约地址。若需手动验证，可在 Remix 调用 getEvidences(address)。
+        direction = "other"
+        counterparty = ""
+        if target:
+            if src == target:
+                direction = "out"
+                counterparty = dst
+            elif dst == target:
+                direction = "in"
+                counterparty = src
 
-6.3 环境变量
-配置 ETHERSCAN_API_KEY、WEB3_PROVIDER_URI、CONTRACT_ADDRESS、SERVER_PRIVATE_KEY。
+        output.append({
+            "hash": tx.get("hash", ""),
+            "from": src,
+            "to": dst,
+            "direction": direction,
+            "counterparty": counterparty,
+            "value_wei": value_wei,
+            "value_eth": round(amount, 6),
+            "asset_symbol": asset_symbol,
+            "asset_type": asset_type,
+        })
+    return output
+```
 
-6.4 启动系统
-激活环境后运行 python app.py，浏览器访问 http://127.0.0.1:5000。
+### 5.2 风险评估实现
 
-第7章 系统演示脚本
-7.1 分析演示
-输入地址后显示风险分值、关系图谱和交易明细；点击图谱中的对手地址，系统自动切换并重新分析。
+#### 5.2.1 功能讲解
+风险评估采用规则评分，重点识别高频交互、对手分散、大额交易、单向外流、黑名单命中等行为。
 
-7.2 子功能演示
-在同一分析页依次点击“地址画像、追踪流入/流出、地址聚类、时序分析”，展示各模块联动。
+#### 5.2.2 对应代码
+```python
+# app.py
 
-7.3 存证演示
-加载分析结果，生成 PDF 报告，计算 hash，上链存证，返回链上交易哈希。
+def detect_risk(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    incoming, outgoing = 0, 0
+    counterparties = set()
+    max_eth = 0.0
+    total_amount = 0.0
 
-7.4 验真演示
-输入报告 hash 执行验真，展示链上与链下一致性检查结果；可按地址查看历史存证记录。
+    for tx in txs:
+        f = str(tx.get("from", "")).lower()
+        t = str(tx.get("to", "")).lower()
+        asset_symbol = str(tx.get("asset_symbol", "ETH")).upper()
+        amount = float(tx.get("value_eth", 0.0))
+        if asset_symbol == "ETH":
+            total_amount += amount
 
-第8章 总结与展望
-本文实现了一个围绕“分析—固化—验真”的虚拟货币溯源存证系统。系统在工程上完成了多源交易接入、风险与聚类分析、交互式图谱钻取和链上存证闭环，具备较强的教学与演示价值。后续可进一步引入自建节点、图神经网络风险识别和多链并行分析能力，提升实时性与泛化能力。
+        if t == address:
+            incoming += 1
+            counterparties.add(f)
+        elif f == address:
+            outgoing += 1
+            counterparties.add(t)
+
+        if asset_symbol == "ETH":
+            max_eth = max(max_eth, amount)
+
+    score = 0
+    alerts = []
+    if len(txs) >= 40:
+        score += 30
+        alerts.append("high-frequency-transactions")
+    if len(counterparties) >= 18:
+        score += 25
+        alerts.append("too-many-counterparties")
+    if max_eth >= 200:
+        score += 20
+        alerts.append("large-single-transfer")
+    if outgoing > incoming * 3 and outgoing >= 15:
+        score += 15
+        alerts.append("one-way-outflow")
+    if address in BLACKLIST:
+        score += 40
+        alerts.append("blacklist-hit")
+    if total_amount >= 1000:
+        score += 10
+        alerts.append("large-total-volume")
+
+    score = min(100, score)
+    level = "LOW" if score < 35 else ("MEDIUM" if score < 70 else "HIGH")
+    return {"score": score, "level": level, "alerts": alerts}
+```
+
+### 5.3 地址聚类实现
+
+#### 5.3.1 功能讲解
+聚类对象是目标地址的直接对手地址。特征包括手续费统计、交互次数、流入流出比例。系统优先使用 KMeans；当科学计算依赖缺失时，自动规则兜底。
+
+#### 5.3.2 对应代码
+```python
+# app.py (关键片段)
+
+feature_rows.append([avg_fee, total_fee, tx_count, fee_std, in_ratio, out_ratio])
+
+if KMeans is not None and StandardScaler is not None and np is not None:
+    mat = np.array(feature_rows, dtype=float)
+    scaler = StandardScaler()
+    mat_scaled = scaler.fit_transform(mat)
+    n_clusters = min(3, len(peer_list))
+    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = [int(x) for x in model.fit_predict(mat_scaled)]
+else:
+    method = "rule-based-fallback-clustering"
+```
+
+```python
+# app.py (簇标签映射，已优化为人均指标)
+
+avg_tx_per_addr = interaction_count / len(members) if members else 0.0
+avg_volume_per_addr = interaction_volume / len(members) if members else 0.0
+
+if avg_tx_per_addr >= 8:
+    cluster_name = LABEL_HIGH_FREQ
+elif avg_volume_per_addr > 20:
+    cluster_name = LABEL_HIGH_VOLUME
+elif avg_fee > 0.001:
+    cluster_name = LABEL_HIGH_FEE
+else:
+    cluster_name = LABEL_NORMAL
+```
+
+### 5.4 一跳追踪实现
+
+#### 5.4.1 功能讲解
+一跳追踪仅统计目标地址与直接对手之间的资金往来，按流入/流出方向聚合金额和笔数。
+
+#### 5.4.2 对应代码
+```python
+# app.py
+
+def one_hop_trace(address: str, txs: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
+    grouped = defaultdict(lambda: {"amount": 0.0, "count": 0})
+    for tx in txs:
+        if direction == "forward" and tx.get("direction") == "out":
+            peer = tx.get("counterparty")
+        elif direction == "backward" and tx.get("direction") == "in":
+            peer = tx.get("counterparty")
+        else:
+            continue
+        if not peer:
+            continue
+        grouped[peer]["amount"] += float(tx.get("value_eth", 0.0))
+        grouped[peer]["count"] += 1
+    ...
+```
+
+### 5.5 地址画像实现
+
+#### 5.5.1 功能讲解
+地址画像整合规模、活跃度、风险、资产构成等指标，形成可解释标签。
+
+#### 5.5.2 对应代码
+```python
+# app.py (关键片段)
+
+def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    counterparties = {tx.get("counterparty") for tx in txs if tx.get("counterparty")}
+    in_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "in" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    out_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "out" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    risk = detect_risk(address, txs)
+
+    asset_counter = defaultdict(int)
+    for tx in txs:
+        asset_counter[str(tx.get("asset_symbol", "ETH")).upper()] += 1
+    asset_mix = [{"asset": k, "tx_count": v} for k, v in sorted(asset_counter.items(), key=lambda kv: kv[1], reverse=True)]
+    ...
+```
+
+### 5.6 时序分析实现
+
+#### 5.6.1 功能讲解
+由于不同资产不能直接相加，系统将 `series` 定义为 ETH 口径主序列，另提供 `series_by_asset` 分币种序列。
+
+#### 5.6.2 对应代码
+```python
+# app.py (关键片段)
+
+def build_time_series(txs: list[dict[str, Any]]) -> dict[str, Any]:
+    bucket = defaultdict(lambda: {"amount": 0.0, "count": 0})
+    asset_bucket = defaultdict(lambda: defaultdict(lambda: {"amount": 0.0, "count": 0}))
+
+    for tx in txs:
+        date_key = (tx.get("time_text", "")[:10])
+        asset = str(tx.get("asset_symbol", "ETH")).upper()
+        amount = float(tx.get("value_eth", 0.0))
+        asset_bucket[asset][date_key]["amount"] += amount
+        asset_bucket[asset][date_key]["count"] += 1
+        if asset == "ETH":
+            bucket[date_key]["amount"] += amount
+            bucket[date_key]["count"] += 1
+
+    return {
+        "series": series,  # ETH only
+        "anomalies": anomalies,
+        "series_by_asset": series_by_asset,
+        "series_unit": "ETH-only",
+    }
+```
+
+### 5.7 可视化与交互实现
+
+#### 5.7.1 功能讲解
+关系图谱节点颜色与簇颜色统一；分析页支持“点击节点即重新分析该地址”。
+
+#### 5.7.2 对应代码
+```python
+# app.py (图谱颜色映射)
+color_map = {
+    LABEL_HIGH_FREQ: "#ef4444",
+    LABEL_HIGH_FEE: "#f59e0b",
+    LABEL_HIGH_VOLUME: "#8b5cf6",
+    LABEL_NORMAL: "#64748b",
+}
+categories = [
+    {"name": "core_address", "itemStyle": {"color": "#0b5fff"}},
+    {"name": LABEL_HIGH_FREQ, "itemStyle": {"color": color_map[LABEL_HIGH_FREQ]}},
+    ...
+]
+```
+
+```javascript
+// analyze.html (节点点击钻取)
+function wireNodeClick() {
+  if (!mainChart) return;
+  mainChart.off("click");
+  mainChart.on("click", async (params) => {
+    if (params.dataType !== "node") return;
+    const clicked = params?.data?.id;
+    if (!isEvmAddress(clicked)) return;
+    if (clicked.toLowerCase() === currentAddress.toLowerCase()) return;
+    document.getElementById("addressInput").value = clicked;
+    await queryAnalyze(clicked);
+  });
+}
+```
+
+### 5.8 报告生成与区块链存证实现
+
+#### 5.8.1 功能讲解
+报告由前端生成 PDF 并计算 SHA-256；后端将哈希调用合约上链。系统同时支持按地址、交易哈希、区块号反查链上哈希。
+
+#### 5.8.2 对应代码
+```python
+# app.py (上链写入)
+
+def store_evidence_onchain(address: str, report_hash: str) -> str:
+    web3, contract, account = get_contract(readonly=False)
+    tx_data = contract.functions.storeEvidence(Web3.to_checksum_address(address), report_hash).build_transaction(...)
+    signed = web3.eth.account.sign_transaction(tx_data, private_key=SERVER_PRIVATE_KEY)
+    tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+    if int(receipt.status) != 1:
+        raise RuntimeError("on-chain transaction reverted")
+    return tx_hash.hex()
+```
+
+```python
+# app.py (按地址读取链上记录)
+
+def read_chain_evidences(address: str) -> list[dict[str, Any]]:
+    web3, contract, _ = get_contract(readonly=True)
+    rows = contract.functions.getEvidences(Web3.to_checksum_address(address)).call()
+    ...
+```
+
+```python
+# app.py (按交易哈希解码)
+
+def evidence_from_tx_hash(tx_hash: str) -> dict[str, Any]:
+    ...
+    fn, args = contract.decode_function_input(tx["input"])
+    if fn.fn_name != "storeEvidence":
+        raise ValidationError("tx is not a storeEvidence call")
+    return {"target": str(args.get("_target", "")).lower(), "report_hash": str(args.get("_hash", "")).lower()}
+```
+
+```python
+# app.py (按区块扫描解码)
+
+def evidence_from_block_number(block_number: int) -> dict[str, Any]:
+    block = web3.eth.get_block(block_number, full_transactions=True)
+    for tx in block["transactions"]:
+        ...
+        fn, args = contract.decode_function_input(tx["input"])
+        if fn.fn_name == "storeEvidence":
+            rows.append({"target": str(args.get("_target", "")).lower(), "report_hash": str(args.get("_hash", "")).lower()})
+```
+
+### 5.9 接口实现概览
+| 接口 | 功能 |
+|---|---|
+| POST /api/analyze | 综合分析（风险、聚类、图谱） |
+| POST /api/profile | 地址画像 |
+| POST /api/trace | 一跳追踪 |
+| POST /api/cluster | 地址聚类 |
+| POST /api/timeseries | 时序分析 |
+| POST /api/evidence/store_onchain | 报告哈希上链 |
+| GET /api/evidence/chain/<address> | 地址维度链上证据查询 |
+| POST /api/evidence/from_tx | 按交易哈希反查证据 |
+| POST /api/evidence/from_block | 按区块反查证据 |
+| POST /api/evidence/verify | 存证验真 |
+
+---
+
+## 说明
+本修订稿重点响应了以下答辩问题：
+1. 三类交易如何统一处理；
+2. 分析页子功能整合与可视化钻取；
+3. 聚类颜色一致性与标签判定优化；
+4. 不同币种时序统计口径；
+5. 通过地址/交易/区块三路径反查报告哈希。
