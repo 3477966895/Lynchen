@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sqlite3
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -661,31 +661,348 @@ def cluster_addresses(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def one_hop_trace(address: str, txs: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, float]] = defaultdict(lambda: {"amount": 0.0, "count": 0})
+def one_hop_trace(
+    address: str,
+    txs: list[dict[str, Any]],
+    direction: str = "both",
+    top_n: int = 20,
+    min_tx_count: int = 1,
+    sort_by: str = "activity",
+) -> dict[str, Any]:
+    # 对每个一跳对手聚合：保留流入/流出、净流、资产分布与时间区间，提升可解释性
+    grouped: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "in_amount_eth": 0.0,
+            "out_amount_eth": 0.0,
+            "in_count": 0,
+            "out_count": 0,
+            "first_time": "",
+            "last_time": "",
+            "assets": defaultdict(lambda: {"amount": 0.0, "count": 0, "in_amount": 0.0, "out_amount": 0.0}),
+        }
+    )
+
     for tx in txs:
-        if direction == "forward" and tx.get("direction") == "out":
-            peer = tx.get("counterparty")
-        elif direction == "backward" and tx.get("direction") == "in":
-            peer = tx.get("counterparty")
-        else:
+        tx_dir = str(tx.get("direction", ""))
+        if tx_dir not in {"in", "out"}:
             continue
+        peer = str(tx.get("counterparty", "")).lower()
         if not peer:
             continue
-        grouped[peer]["amount"] += float(tx.get("value_eth", 0.0))
-        grouped[peer]["count"] += 1
 
-    rows = []
-    for peer, summary in grouped.items():
+        amount = abs(float(tx.get("value_eth", 0.0)))
+        asset = str(tx.get("asset_symbol", "ETH")).upper()
+        t = str(tx.get("time_text", ""))
+        g = grouped[peer]
+
+        if tx_dir == "in":
+            g["in_count"] += 1
+            if asset == "ETH":
+                g["in_amount_eth"] += amount
+            g["assets"][asset]["in_amount"] += amount
+        else:
+            g["out_count"] += 1
+            if asset == "ETH":
+                g["out_amount_eth"] += amount
+            g["assets"][asset]["out_amount"] += amount
+
+        g["assets"][asset]["amount"] += amount
+        g["assets"][asset]["count"] += 1
+        if t:
+            if (not g["first_time"]) or t < g["first_time"]:
+                g["first_time"] = t
+            if (not g["last_time"]) or t > g["last_time"]:
+                g["last_time"] = t
+
+    rows: list[dict[str, Any]] = []
+    for peer, g in grouped.items():
+        total_count = int(g["in_count"] + g["out_count"])
+        if total_count < max(1, int(min_tx_count)):
+            continue
+
+        in_eth = round(float(g["in_amount_eth"]), 6)
+        out_eth = round(float(g["out_amount_eth"]), 6)
+        gross_eth = round(in_eth + out_eth, 6)
+        net_eth = round(in_eth - out_eth, 6)
+
+        assets = []
+        for asset, stats in g["assets"].items():
+            assets.append(
+                {
+                    "asset": asset,
+                    "amount": round(float(stats["amount"]), 6),
+                    "in_amount": round(float(stats["in_amount"]), 6),
+                    "out_amount": round(float(stats["out_amount"]), 6),
+                    "count": int(stats["count"]),
+                }
+            )
+        assets.sort(key=lambda x: x["count"], reverse=True)
+        dominant_asset = assets[0]["asset"] if assets else "ETH"
+
+        flags = []
+        if g["out_count"] >= 8 and g["in_count"] == 0:
+            flags.append("单向外流")
+        if g["in_count"] >= 8 and g["out_count"] == 0:
+            flags.append("单向流入")
+        if total_count >= 10:
+            flags.append("高频交互")
+        if gross_eth >= 100:
+            flags.append("高ETH流量")
+
+        if direction == "forward":
+            amount_focus = out_eth
+            tx_count_focus = int(g["out_count"])
+            from_addr = address
+            to_addr = peer
+        elif direction == "backward":
+            amount_focus = in_eth
+            tx_count_focus = int(g["in_count"])
+            from_addr = peer
+            to_addr = address
+        else:  # both
+            amount_focus = gross_eth
+            tx_count_focus = total_count
+            from_addr = address
+            to_addr = peer
+
+        if tx_count_focus <= 0:
+            continue
+
         rows.append(
             {
-                "from": address if direction == "forward" else peer,
-                "to": peer if direction == "forward" else address,
-                "amount_eth": round(summary["amount"], 6),
-                "tx_count": int(summary["count"]),
+                "peer": peer,
+                "from": from_addr,
+                "to": to_addr,
+                "amount_eth": round(amount_focus, 6),
+                "tx_count": tx_count_focus,
+                "total_count": total_count,
+                "in_count": int(g["in_count"]),
+                "out_count": int(g["out_count"]),
+                "in_amount_eth": in_eth,
+                "out_amount_eth": out_eth,
+                "gross_amount_eth": gross_eth,
+                "net_amount_eth": net_eth,
+                "dominant_asset": dominant_asset,
+                "assets": assets[:8],
+                "first_time": g["first_time"],
+                "last_time": g["last_time"],
+                "flags": flags,
             }
         )
-    return sorted(rows, key=lambda x: x["amount_eth"], reverse=True)
+
+    if sort_by == "eth_volume":
+        rows.sort(key=lambda x: (x["gross_amount_eth"], x["total_count"]), reverse=True)
+    elif sort_by == "net_flow":
+        rows.sort(key=lambda x: abs(x["net_amount_eth"]), reverse=True)
+    else:
+        rows.sort(key=lambda x: (x["total_count"], x["gross_amount_eth"]), reverse=True)
+
+    top_n = max(1, min(100, int(top_n)))
+    rows = rows[:top_n]
+
+    total_in_eth = round(sum(x["in_amount_eth"] for x in rows), 6)
+    total_out_eth = round(sum(x["out_amount_eth"] for x in rows), 6)
+    summary = {
+        "peer_count": len(rows),
+        "total_in_eth": total_in_eth,
+        "total_out_eth": total_out_eth,
+        "total_net_eth": round(total_in_eth - total_out_eth, 6),
+        "total_tx_count": int(sum(x["total_count"] for x in rows)),
+    }
+
+    return {"direction": direction, "sort_by": sort_by, "top_n": top_n, "summary": summary, "rows": rows}
+
+
+def build_trace_graph(
+    root_address: str,
+    direction: str,
+    hops: int,
+    per_address_limit: int,
+    max_children: int,
+    min_amount_eth: float,
+) -> dict[str, Any]:
+    # 多跳追踪：按层扩展一跳交易，构建可视化资金链路
+    if direction not in {"forward", "backward"}:
+        raise ValidationError("trace graph direction must be forward/backward")
+    hops = max(1, min(4, int(hops)))
+    per_address_limit = max(20, min(100, int(per_address_limit)))
+    max_children = max(2, min(20, int(max_children)))
+    min_amount_eth = max(0.0, float(min_amount_eth))
+
+    tx_cache: dict[str, list[dict[str, Any]]] = {}
+
+    def get_txs(addr: str) -> list[dict[str, Any]]:
+        key = addr.lower()
+        if key not in tx_cache:
+            tx_cache[key] = compact_txs(etherscan_fetch(key, per_address_limit), key)
+        return tx_cache[key]
+
+    nodes_map: dict[str, dict[str, Any]] = {
+        root_address: {"id": root_address, "name": root_address, "level": 0, "role": "root"}
+    }
+    links_map: dict[tuple[str, str], dict[str, Any]] = {}
+
+    frontier = [root_address]
+    expanded: set[str] = set()
+    max_total_nodes = 120
+
+    for depth in range(1, hops + 1):
+        if not frontier:
+            break
+        next_frontier: list[str] = []
+        for current in frontier:
+            current = current.lower()
+            if current in expanded:
+                continue
+            expanded.add(current)
+
+            grouped: dict[str, dict[str, Any]] = defaultdict(
+                lambda: {"amount_eth": 0.0, "count": 0, "first_time": "", "last_time": ""}
+            )
+            for tx in get_txs(current):
+                tx_dir = str(tx.get("direction", ""))
+                peer = str(tx.get("counterparty", "")).lower()
+                if not peer:
+                    continue
+                amount = abs(float(tx.get("value_eth", 0.0)))
+                if amount <= 0:
+                    continue
+                t = str(tx.get("time_text", ""))
+
+                if direction == "forward":
+                    if tx_dir != "out":
+                        continue
+                else:  # backward
+                    if tx_dir != "in":
+                        continue
+
+                g = grouped[peer]
+                g["amount_eth"] += amount
+                g["count"] += 1
+                if t:
+                    if (not g["first_time"]) or t < g["first_time"]:
+                        g["first_time"] = t
+                    if (not g["last_time"]) or t > g["last_time"]:
+                        g["last_time"] = t
+
+            candidates = []
+            for peer, g in grouped.items():
+                amount = round(float(g["amount_eth"]), 6)
+                if amount < min_amount_eth:
+                    continue
+                candidates.append((peer, amount, int(g["count"]), g["first_time"], g["last_time"]))
+
+            candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+            candidates = candidates[:max_children]
+
+            for peer, amount, count, first_time, last_time in candidates:
+                if direction == "forward":
+                    source, target = current, peer
+                else:
+                    source, target = peer, current
+
+                key = (source, target)
+                if key not in links_map:
+                    links_map[key] = {
+                        "source": source,
+                        "target": target,
+                        "amount_eth": 0.0,
+                        "tx_count": 0,
+                        "first_time": first_time,
+                        "last_time": last_time,
+                        "hop": depth,
+                    }
+                links_map[key]["amount_eth"] = round(float(links_map[key]["amount_eth"]) + amount, 6)
+                links_map[key]["tx_count"] = int(links_map[key]["tx_count"]) + count
+                if first_time and ((not links_map[key]["first_time"]) or first_time < links_map[key]["first_time"]):
+                    links_map[key]["first_time"] = first_time
+                if last_time and ((not links_map[key]["last_time"]) or last_time > links_map[key]["last_time"]):
+                    links_map[key]["last_time"] = last_time
+
+                if peer not in nodes_map:
+                    nodes_map[peer] = {
+                        "id": peer,
+                        "name": peer,
+                        "level": depth,
+                        "role": "peer",
+                    }
+                else:
+                    nodes_map[peer]["level"] = min(int(nodes_map[peer].get("level", depth)), depth)
+
+                if len(nodes_map) < max_total_nodes:
+                    next_frontier.append(peer)
+
+        # 控制下一层规模，避免API爆炸
+        uniq = []
+        seen = set()
+        for a in next_frontier:
+            if a in seen:
+                continue
+            seen.add(a)
+            uniq.append(a)
+        frontier = uniq[: max_children * 3]
+
+    if len(nodes_map) <= 1:
+        return {
+            "direction": direction,
+            "hops": hops,
+            "nodes": [],
+            "links": [],
+            "summary": {"node_count": 0, "edge_count": 0, "total_amount_eth": 0.0, "total_tx_count": 0},
+        }
+
+    # 生成可视化节点/边
+    nodes = []
+    for node_id, n in nodes_map.items():
+        level = int(n.get("level", 0))
+        role = str(n.get("role", "peer"))
+        symbol_size = 56 if role == "root" else max(24, 46 - level * 6)
+        color = "#0b5fff" if role == "root" else ("#f59e0b" if direction == "forward" else "#10b981")
+        nodes.append(
+            {
+                "id": node_id,
+                "name": node_id,
+                "category": f"L{level}",
+                "symbolSize": symbol_size,
+                "itemStyle": {"color": color},
+                "value": level,
+            }
+        )
+
+    links = []
+    total_amount = 0.0
+    total_tx_count = 0
+    for link in links_map.values():
+        total_amount += float(link["amount_eth"])
+        total_tx_count += int(link["tx_count"])
+        links.append(
+            {
+                "source": link["source"],
+                "target": link["target"],
+                "value": round(float(link["amount_eth"]), 6),
+                "amount_eth": round(float(link["amount_eth"]), 6),
+                "tx_count": int(link["tx_count"]),
+                "hop": int(link["hop"]),
+                "first_time": link["first_time"],
+                "last_time": link["last_time"],
+                "lineStyle": {"width": max(1, min(8, int(float(link["amount_eth"]) ** 0.5) + 1))},
+            }
+        )
+
+    categories = [{"name": f"L{i}"} for i in range(0, hops + 1)]
+    return {
+        "direction": direction,
+        "hops": hops,
+        "nodes": nodes,
+        "links": links,
+        "categories": categories,
+        "summary": {
+            "node_count": len(nodes),
+            "edge_count": len(links),
+            "total_amount_eth": round(total_amount, 6),
+            "total_tx_count": int(total_tx_count),
+        },
+    }
 
 
 def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -743,44 +1060,104 @@ def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, 
 
 
 def build_time_series(txs: list[dict[str, Any]]) -> dict[str, Any]:
-    # series: 仅统计 ETH（native + internal），避免与 ERC20 直接相加产生口径错误
-    bucket: dict[str, dict[str, float]] = defaultdict(lambda: {"amount": 0.0, "count": 0})
-    asset_bucket: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: {"amount": 0.0, "count": 0}))
+    # series: 默认统计 ETH，且区分流入/流出/净流，避免“总额全为正”导致信息丢失
+    bucket: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"in_amount": 0.0, "out_amount": 0.0, "gross_amount": 0.0, "count": 0.0}
+    )
+    asset_bucket: dict[str, dict[str, dict[str, float]]] = defaultdict(
+        lambda: defaultdict(lambda: {"in_amount": 0.0, "out_amount": 0.0, "gross_amount": 0.0, "count": 0.0})
+    )
     for tx in txs:
         t = tx.get("time_text", "")
         date_key = t[:10] if t else ""
         if not date_key:
             continue
         asset = str(tx.get("asset_symbol", "ETH")).upper()
-        amount = float(tx.get("value_eth", 0.0))
-        asset_bucket[asset][date_key]["amount"] += amount
-        asset_bucket[asset][date_key]["count"] += 1
+        direction = str(tx.get("direction", "")).lower()
+        amount = abs(float(tx.get("value_eth", 0.0)))
+        if amount <= 0:
+            continue
+
+        target_bucket = asset_bucket[asset][date_key]
+        if direction == "in":
+            target_bucket["in_amount"] += amount
+        elif direction == "out":
+            target_bucket["out_amount"] += amount
+        else:
+            # 仅统计与目标地址相关的in/out，other不纳入时序
+            continue
+        target_bucket["gross_amount"] += amount
+        target_bucket["count"] += 1
+
         if asset == "ETH":
-            bucket[date_key]["amount"] += amount
+            if direction == "in":
+                bucket[date_key]["in_amount"] += amount
+            elif direction == "out":
+                bucket[date_key]["out_amount"] += amount
+            bucket[date_key]["gross_amount"] += amount
             bucket[date_key]["count"] += 1
 
-    series = [{"date": d, "amount": round(v["amount"], 6), "count": int(v["count"])} for d, v in sorted(bucket.items())]
+    sorted_days = sorted(bucket.items())
+    series = [{"date": d, "amount": round(v["gross_amount"], 6), "count": int(v["count"])} for d, v in sorted_days]
+    series_in_eth = [{"date": d, "amount": round(v["in_amount"], 6)} for d, v in sorted_days]
+    series_out_eth = [{"date": d, "amount": round(v["out_amount"], 6)} for d, v in sorted_days]
+    series_net_eth = [{"date": d, "amount": round(v["in_amount"] - v["out_amount"], 6)} for d, v in sorted_days]
+    series_tx_count = [{"date": d, "count": int(v["count"])} for d, v in sorted_days]
+
     amounts = [x["amount"] for x in series]
     if not amounts:
-        return {"series": [], "anomalies": [], "series_by_asset": {}, "series_unit": "asset-native-unit"}
+        return {
+            "series": [],
+            "series_in_eth": [],
+            "series_out_eth": [],
+            "series_net_eth": [],
+            "series_tx_count": [],
+            "anomalies": [],
+            "anomalies_net_eth": [],
+            "series_by_asset": {},
+            "series_unit": "ETH-only",
+        }
 
     mean = vec_mean(amounts)
     std = vec_std(amounts)
     upper = mean + 3 * std
     lower = mean - 3 * std
     anomalies = [item for item in series if item["amount"] > upper or item["amount"] < lower]
+
+    net_amounts = [x["amount"] for x in series_net_eth]
+    net_mean = vec_mean(net_amounts)
+    net_std = vec_std(net_amounts)
+    net_upper = net_mean + 3 * net_std
+    net_lower = net_mean - 3 * net_std
+    anomalies_net_eth = [item for item in series_net_eth if item["amount"] > net_upper or item["amount"] < net_lower]
+
     series_by_asset: dict[str, list[dict[str, Any]]] = {}
     for asset, per_day in asset_bucket.items():
         series_by_asset[asset] = [
-            {"date": d, "amount": round(v["amount"], 6), "count": int(v["count"])}
+            {
+                "date": d,
+                # amount保留为兼容字段（历史前端/报表仍可读取）
+                "amount": round(v["gross_amount"], 6),
+                "in_amount": round(v["in_amount"], 6),
+                "out_amount": round(v["out_amount"], 6),
+                "net_amount": round(v["in_amount"] - v["out_amount"], 6),
+                "gross_amount": round(v["gross_amount"], 6),
+                "count": int(v["count"]),
+            }
             for d, v in sorted(per_day.items())
         ]
     return {
+        # 兼容旧前端：series.amount = ETH每日总流量（|in|+|out|）
         "series": series,
+        "series_in_eth": series_in_eth,
+        "series_out_eth": series_out_eth,
+        "series_net_eth": series_net_eth,
+        "series_tx_count": series_tx_count,
         "anomalies": anomalies,
+        "anomalies_net_eth": anomalies_net_eth,
         "series_by_asset": series_by_asset,
         "series_unit": "ETH-only",
-        "note": "series字段仅统计ETH，不与ERC20直接混加；完整分币种结果见series_by_asset",
+        "note": "series为ETH总流量（in+out），series_net_eth为ETH净流量（in-out）；ERC20分币种结果见series_by_asset",
     }
 
 
@@ -1180,12 +1557,32 @@ def batch_query():
 def trace_api():
     body = request.get_json(silent=True) or {}
     address = normalize_address(body.get("address", ""))
-    direction = str(body.get("direction", "forward")).strip()
-    if direction not in {"forward", "backward"}:
-        raise ValidationError("direction must be forward/backward")
+    direction = str(body.get("direction", "both")).strip()
+    if direction not in {"forward", "backward", "both"}:
+        raise ValidationError("direction must be forward/backward/both")
 
-    txs = compact_txs(etherscan_fetch(address, min(DEFAULT_TX_LIMIT, 100)), address)
-    return jsonify({"direction": direction, "paths": one_hop_trace(address, txs, direction)})
+    sort_by = str(body.get("sort_by", "activity")).strip()
+    if sort_by not in {"activity", "eth_volume", "net_flow"}:
+        raise ValidationError("sort_by must be activity/eth_volume/net_flow")
+
+    top_n = parse_int(body.get("top_n", 20), 20)
+    min_tx_count = parse_int(body.get("min_tx_count", 1), 1)
+
+    limit = parse_limit(body.get("limit", min(DEFAULT_TX_LIMIT, 100)))
+    txs = compact_txs(etherscan_fetch(address, limit), address)
+    trace_result = one_hop_trace(address, txs, direction, top_n=top_n, min_tx_count=min_tx_count, sort_by=sort_by)
+
+    # 向后兼容旧前端字段
+    trace_result["paths"] = [
+        {
+            "from": row["from"],
+            "to": row["to"],
+            "amount_eth": row["amount_eth"],
+            "tx_count": row["tx_count"],
+        }
+        for row in trace_result["rows"]
+    ]
+    return jsonify(trace_result)
 
 
 @app.route("/api/profile", methods=["POST"])

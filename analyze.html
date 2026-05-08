@@ -53,7 +53,7 @@
         分值：<b id="riskScore">0</b>
       </div>
       <div id="riskAlerts" class="text-muted mt-1"></div>
-      <div class="small text-muted mt-1">提示：点击图谱中的任意对手地址节点，将自动触发该地址的新一轮溯源分析。</div>
+      <div class="small text-muted mt-1">提示：点击图谱节点可分析该地址；按住 Shift 点击或右键节点可复制地址。</div>
       <div class="row g-2 mt-2">
         <div class="col-md-2"><button id="profileBtn" class="btn btn-outline-primary w-100">地址画像</button></div>
         <div class="col-md-2"><button id="traceInBtn" class="btn btn-outline-warning w-100">追踪流入</button></div>
@@ -129,6 +129,10 @@ async function api(url, method = "GET", body = null, timeoutMs = 25000) {
 }
 
 function shortHash(h) { return h ? `${h.slice(0, 10)}...${h.slice(-6)}` : "-"; }
+function fmt(v, n = 6) {
+  const x = Number(v || 0);
+  return Number.isFinite(x) ? x.toFixed(n) : "0.000000";
+}
 
 function setAlert(type, text) {
   document.getElementById("queryAlert").innerHTML = `<div class='alert alert-${type} mb-2'>${text}</div>`;
@@ -185,16 +189,57 @@ function renderTxRows(rows) {
   });
 }
 
+async function copyTextToClipboard(text) {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch (_) {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (_) {
+    return false;
+  }
+}
+
 function wireNodeClick() {
   if (!mainChart) return;
   mainChart.off("click");
+  mainChart.off("contextmenu");
   mainChart.on("click", async (params) => {
     if (params.dataType !== "node") return;
     const clicked = params?.data?.id;
     if (!isEvmAddress(clicked)) return;
+    if (params?.event?.event?.shiftKey) {
+      const ok = await copyTextToClipboard(clicked);
+      setAlert(ok ? "success" : "warning", ok ? `已复制地址：${clicked}` : "复制失败，请手动复制");
+      return;
+    }
     if (clicked.toLowerCase() === currentAddress.toLowerCase()) return;
     document.getElementById("addressInput").value = clicked;
     await queryAnalyze(clicked);
+  });
+  mainChart.on("contextmenu", async (params) => {
+    if (params.dataType !== "node") return;
+    const clicked = params?.data?.id;
+    if (!isEvmAddress(clicked)) return;
+    try {
+      params?.event?.event?.preventDefault?.();
+    } catch (_) {}
+    const ok = await copyTextToClipboard(clicked);
+    setAlert(ok ? "success" : "warning", ok ? `已复制地址：${clicked}` : "复制失败，请手动复制");
   });
 }
 
@@ -299,12 +344,49 @@ async function traceCore(direction) {
   const address = getAddressOrCurrent();
   if (!isEvmAddress(address)) return alert("请先输入合法地址");
   try {
-    setAlert("info", `正在执行${direction === "forward" ? "流出" : "流入"}追踪…`);
-    const data = await api("/api/trace", "POST", { address, direction });
-    let html = "<ul class='small'>";
-    data.paths.forEach(p => html += `<li class='mono'>${p.from} -> ${p.to}，${p.amount_eth}，${p.tx_count} 笔</li>`);
-    html += "</ul>";
-    document.getElementById("traceResult").innerHTML = html || "暂无路径";
+    const title = direction === "forward" ? "流出" : "流入";
+    setAlert("info", `正在执行${title}追踪…`);
+    const limit = Number(document.getElementById("limitInput").value || 50);
+    const data = await api("/api/trace", "POST", {
+      address,
+      direction,
+      limit,
+      top_n: 15,
+      min_tx_count: 1,
+      sort_by: "eth_volume"
+    });
+
+    const rows = data.rows || [];
+    if (!rows.length) {
+      document.getElementById("traceResult").innerHTML = "<div class='alert alert-warning'>暂无可用追踪结果</div>";
+      return;
+    }
+
+    const s = data.summary || {};
+    let html = `<div class='small mb-2'>
+      对手数：<b>${s.peer_count ?? rows.length}</b>，
+      总笔数：<b>${s.total_tx_count ?? "-"}</b>，
+      流入ETH：<b>${fmt(s.total_in_eth ?? 0)}</b>，
+      流出ETH：<b>${fmt(s.total_out_eth ?? 0)}</b>，
+      净流ETH：<b>${fmt(s.total_net_eth ?? 0)}</b>
+    </div>`;
+    html += "<div class='table-responsive'><table class='table table-sm table-bordered'><thead class='table-light'><tr><th>对手地址</th><th>总笔数</th><th>流入ETH</th><th>流出ETH</th><th>净流ETH</th><th>主资产</th><th>最近交互</th><th>标记</th></tr></thead><tbody>";
+    rows.forEach(r => {
+      const flag = (r.flags || []).join("、") || "-";
+      html += `<tr>
+        <td class='mono'>${shortHash(r.peer)}</td>
+        <td>${r.total_count}</td>
+        <td>${fmt(r.in_amount_eth)}</td>
+        <td>${fmt(r.out_amount_eth)}</td>
+        <td>${fmt(r.net_amount_eth)}</td>
+        <td>${r.dominant_asset || "-"}</td>
+        <td>${r.last_time || "-"}</td>
+        <td>${flag}</td>
+      </tr>`;
+    });
+    html += "</tbody></table></div>";
+    document.getElementById("traceResult").innerHTML = html;
+    setAlert("success", `${title}追踪完成：已返回 ${rows.length} 个关键对手`);
   } catch (e) {
     document.getElementById("traceResult").innerHTML = `<div class='alert alert-danger'>${e.message}</div>`;
   }
@@ -344,16 +426,32 @@ async function loadTimeSeriesCore() {
   try {
     setAlert("info", "正在加载时序分析…");
     const data = await api("/api/timeseries", "POST", { address });
-    const dates = data.series.map(x => x.date);
-    const amounts = data.series.map(x => x.amount);
+    const dates = (data.series || []).map(x => x.date);
+    const inAmounts = (data.series_in_eth || []).map(x => Number(x.amount || 0));
+    const outAmounts = (data.series_out_eth || []).map(x => -Number(x.amount || 0)); // 流出画成负值更直观
+    const netAmounts = (data.series_net_eth || []).map(x => Number(x.amount || 0));
+    const txCounts = (data.series_tx_count || []).map(x => Number(x.count || 0));
     if (timeChart) timeChart.dispose();
     timeChart = echarts.init(document.getElementById("timeChart"));
     timeChart.setOption({
-      tooltip: { trigger: "axis" },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "cross" },
+      },
+      legend: { data: ["流入(ETH)", "流出(ETH)", "净流量(ETH)", "交易笔数"] },
       xAxis: { type: "category", data: dates },
-      yAxis: { type: "value", name: "Amount" },
-      series: [{ type: "line", data: amounts, smooth: true }]
+      yAxis: [
+        { type: "value", name: "ETH", axisLabel: { formatter: "{value}" } },
+        { type: "value", name: "笔数", axisLabel: { formatter: "{value}" }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: "流入(ETH)", type: "bar", stack: "eth", data: inAmounts, yAxisIndex: 0, itemStyle: { color: "#10b981" } },
+        { name: "流出(ETH)", type: "bar", stack: "eth", data: outAmounts, yAxisIndex: 0, itemStyle: { color: "#ef4444" } },
+        { name: "净流量(ETH)", type: "line", data: netAmounts, yAxisIndex: 0, smooth: true, itemStyle: { color: "#2563eb" } },
+        { name: "交易笔数", type: "line", data: txCounts, yAxisIndex: 1, smooth: true, itemStyle: { color: "#f59e0b" } },
+      ]
     });
+    setAlert("success", "时序图已更新：流入/流出/净流量与交易笔数已分离展示");
   } catch (e) {
     document.getElementById("clusterResult").innerHTML = `<div class='alert alert-danger'>${e.message}</div>`;
   }
