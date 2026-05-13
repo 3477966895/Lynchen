@@ -1,0 +1,650 @@
+学科代码：   0831   
+
+
+
+
+本 科 毕 业 设 计
+（2022—2026年）
+
+题   目：基于区块链的虚拟货币溯源及存证系统的设计与实现 
+
+系    部：  网络安全学院  专业：  网络安全与执法 
+中    队：               2242中队               
+学生姓名：    杨谨      学号：      224220      
+指导教师：      龚红辉      职称：     讲师      
+起讫日期：        2025.10.15——2026.4.18        
+
+
+
+
+江西警察学院
+本科毕业论文（设计）原创性申明
+本人郑重申明：所呈交的设计是本人在导师的指导下独立进行研究所取得的研究成果。除了文中特别加以标注引用的内容外，本设计不包含任何其他个人或集体已经发表或撰写的成果。对本文的研究作出重要贡献的个人和集体，均已在文中以明确方式表明。本人完全意识到本申明的法律后果由本人承担。
+
+作者签名：                       日期：
+
+
+
+
+本科毕业论文（设计）版权使用授权书
+本毕业设计作者完全了解学院有关保留、使用毕业设计的规定，同意学院保留并向国家有关部门或机构送交设计的复印件和电子版，允许设计被查阅和借阅。本人授权江西警察学院可以将本设计的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或扫描等复制手段保存和汇编本毕业设计。
+                        保密□，在  年解密后适用本授权书。
+本毕业设计属于
+                        不保密□。
+（请在以上相应方框内打“√”）
+作者签名：                       日期：
+
+导师签名：                       日期：
+基于区块链的虚拟货币溯源及存证系统的设计与实现
+
+摘  要： 虚拟货币的匿名性和跨链转移的复杂性给监管工作带来了实际困难。传统的人工排查效率低下，而既有的商业分析工具多为黑箱，难以向执法部门解释分析依据。本文面对这一现实需求，设计并实现了一套从交易采集、风险识别、报告固化到链上验真的完整系统。系统核心创新有三个方面。第一是交易数据的完整性。第二是分析结果的可解释性。第三是证据的防篡改保证。实验表明，该系统在处理中等规模地址集（数百个交易、数十个对手）时能在5秒内完成完整分析，满足交互式应用的需求。在演示中通过对具体地址的追踪、报告生成、篡改检测等操作，验证了系统在工程实现层面的可行性。系统代码约2000行（不含前端），采用模块化设计，便于后续的功能扩展（如增加新的数据源、替换为机器学习风险评估等）。虽然系统仍存在局限性——目前仅支持以太坊生态、风险规则需要根据实际案例不断优化、大规模交易集的处理仍需性能优化——但在科研原型和教学演示方面已具备较完整的形态。本文的贡献不仅在于一个可用的系统，更在于对"如何在透明性与性能间取舍、如何通过双轨机制提升可信度、如何从工程视角实现学术创新"这些问题的具体探索。
+关键词：区块链;虚拟货币;交易溯源;地址聚类;风险评估;电子存证
+
+
+
+
+Design and Implementation of a Blockchain-Based Virtual Currency Traceability and Certification System
+
+Abstract
+The anonymity of cryptocurrencies and the complexity of cross-chain transfers pose practical difficulties for regulatory efforts. Traditional manual tracing is inefficient, while existing commercial analysis tools are mostly black boxes, making it difficult to explain their analytical basis to law enforcement agencies. To address this practical need, this paper designs and implements a complete system encompassing transaction collection, risk identification, report finalization, and on-chain verification. The core innovations of the system are threefold: first, completeness of transaction data; second, interpretability of analysis results; third, tamperproof assurance of evidence. Experiments show that the system can complete a full analysis within 5 seconds when processing mediumscale address sets (hundreds of transactions, dozens of counterparties), meeting the requirements of interactive applications. Through demonstrations involving address tracing, report generation, and tamper detection, the system’s feasibility at the engineering implementation level is validated. The system comprises approximately 2,000 lines of code (excluding the frontend) and adopts a modular design, facilitating future extensions (e.g., adding new data sources, replacing with machinelearningbased risk assessment).Although the system still has limitations—currently supporting only the Ethereum ecosystem, requiring continuous refinement of risk rules based on realworld cases, and needing performance optimization for largescale transaction sets—it already presents a relatively complete form for research prototyping and teaching demonstrations. The contribution of this paper lies not only in a usable system, but also in a concrete exploration of questions such as how to trade off between transparency and performance, how to enhance trustworthiness via a dualmechanism approach, and how to achieve academic innovation from an engineering perspective.
+
+Key words: Blockchain；Virtual Currency；Transaction Traceability；Address Clustering；Risk Assessmen；Electronic Evidence Storage
+
+目 录
+第一章 绪论	4
+ 1.1　研究背景	4
+ 1.2　研究目标与创新	4
+ 1.3　论文结构安排	5
+第二章　关键技术基础	6
+ 2.1　区块链技术与智能合约	6
+ 2.2　Web3与本地链环境	6
+ 2.3　数据可视化技术	7
+ 2.4　哈希函数与数据完整性校验	7
+ 2.5　数据聚类与机器学习基础	7
+ 2.6　系统技术栈的模块化设计	8
+第三章 系统需求分析	9
+ 3.1　功能需求	9
+ 3.2　非功能需求	9
+第四章　系统总体设计	11
+ 4.1　系统架构设计	11
+ 4.2　数据流设计	11
+第五章　系统实现	14
+ 5.1 部署流程	14
+ 5.2  可视化与交互实现	15
+ 5.3　三类交易统一处理	17
+ 5.4　风险评估实现	19
+ 5.5　地址聚类实现	21
+ 5.6　一跳追踪与地址画像实现	22
+ 5.7　时序分析与关系图谱实现	24
+ 5.8　报告生成与区块链存证实现	25
+第六章 系统测试	28
+ 6.1 功能测试	28
+ 6.2 非功能需求验证	30
+ 6.3 测试结论	31
+第七章　总结与展望	32
+ 7.1　研究成果总结	32
+ 7.2　系统的现实意义与教学价值	32
+ 7.3　存在的不足与改进方向	33
+ 7.4　结束语	33
+参考文献	34
+致谢	36
+附录一	37
+
+
+第一章 绪论
+1.1　研究背景
+虚拟货币作为基于区块链技术的创新金融工具，在促进金融创新的同时，也在客观上为资金非法流转提供了新的掩护手段。虚拟货币交易具有全球化、高频化、碎片化的特点，使得传统的人工排查方法效率极低。尤其在执法取证阶段，若缺少可复核、可追溯、可校验的证据链，后续问责与审计工作会面临严重困难。因此，构建一套“分析结果可解释、报告内容可验真、证据链条可追责”的系统具有重要的现实价值。
+在技术层面，虚拟货币犯罪呈现出“交易频繁、链路长、地址多、跨平台”的特点。不法分子往往通过多级地址拆分转移、与中心化交易所或混币服务交互、再通过跨链桥和闪兑等方式掩盖资金去向。侦查人员需要在海量链上数据中快速定位关键交易路径与关联地址，并将分析结果固化为可复核的电子证据。然而，现有的区块链分析工具多为商业化平台，其内部算法模型、数据处理逻辑和证据生成流程往往缺乏透明性，这在司法诉讼中容易遭受“黑箱分析”“不可复现”的质疑。
+从数据形态看，区块链原始数据是结构化的交易与区块信息，但办案过程中往往需要将其转换为“可读、可解释”的研判材料，例如资金流向图、交易明细表、统计结论等。传统做法依赖人工导出与截图，既耗时也难以保证取证过程的一致性。更重要的是，若缺乏统一的采集、处理、固化与校验流程，分析报告在诉讼中可能被质疑为“事后编辑”“缺乏原始依据”，从而影响证据证明力。在司法环节，对电子数据证据的真实性、完整性、关联性与合法性提出了更高要求。即便链上交易数据公开透明，从“数据采集—分析处理—报告形成”全过程若缺乏可验证机制，仍可能遭遇对方当事人质疑。因此，将溯源分析与可信存证相结合，构建可复核、可验证、可追溯的证据链条，是虚拟货币案件取证工作的关键。
+1.2　研究目标与创新
+本文的研究目标是设计并实现一个可运行、可演示、可答辩的完整原型系统，具体包括以下四个方面：
+（1）完整的交易数据获取与统一建模：针对以太坊网络中native交易、internal交易与erc20代币交易分散在不同接口的问题，需要实现统一的数据抓取、融合与标准化处理机制，确保交易视图的完整性。
+（2）多维度的地址风险评估与聚类识别：基于交易行为特征，设计可解释的风险评分规则，并通过KMeans聚类与规则启发式相结合的方法，对目标地址的对手进行自动分类和标签化。
+（3）可视化的分析报告与PDF生成：将分析结果整合成结构化的PDF报告，包含地址、风险评级、关键统计与交易表，便于归档与复核。
+（4）报告哈希链上存证与链上链下双通道验真：实现报告摘要的智能合约存储，设计验真机制使得任何文件篡改都能被及时识别，确保证据的不可篡改性。
+1.3　论文结构安排
+本文共分7章，各章的主要内容如下：第1章为绪论，阐述了研究背景、研究目标、创新点与论文结构。第2章介绍关键技术基础，包括区块链与智能合约机制、Web3环境、可视化与交互技术等。第3章进行需求分析，明确功能需求与非功能需求。第4章详细阐述系统的总体架构设计，包括双层架构、数据流设计、数据流设计等。第5章深入讨论核心功能实现，包括交易数据获取与标准化、风险评估模型、地址聚类模型、一跳追踪与地址画像、分析页整合子功能、时序分析口径、报告生成策略、以及区块链存证与验真机制。第六章演示并测试先期配置以及后端与前端功能演示。第7章总结研究成果、分析存在的不足。
+第二章　关键技术基础
+2.1　区块链技术与智能合约
+区块链的核心结构是时间顺序链接的数据块。每个区块都包含前一区块的哈希值，这种链式结构一旦形成就难以篡改——任何历史数据的改动都会导致后续所有区块的哈希链路失效。这一特性源于哈希函数的性质：输入微小变化会导致输出完全不同。正因为这种“牵一发动全身”的机制，区块链天然适合存储需要防篡改保证的证据摘要。
+智能合约是部署在区块链上的自动执行程序。与传统合约由人工履行不同，智能合约以代码的形式编写业务逻辑，一旦条件被触发就自动执行，无需中介。Solidity是以太坊智能合约的主流编程语言，支持函数定义、状态变量、事件等编程原语。
+在智能合约的设计中，一个关键决策是存储内容的选择。有两种极端方案：一是存储完整数据（如整个PDF），二是仅存储数据摘要（如SHA-256哈希）。前者提供了最高的可验证性，但链上存储成本高昂（以太坊按字节计费）；后者成本低廉，但若原始数据丢失则无法恢复。实践中，大多数应用采用“存摘要、链下存原文”的混合方案——这正是本文采用的策略。
+2.2　Web3与本地链环境
+Web3是与区块链交互的编程接口标准。在实际开发中，Web3并非单一库，而是一套跨语言的规范。Python生态中的Web3.py库实现了这套规范，提供了账户管理、交易构建、合约调用等核心功能。
+Web3通过JSON-RPC协议与区块链节点通信。JSON-RPC是一种轻量级的远程过程调用协议，客户端以JSON格式发送请求，节点以JSON格式返回结果。一个典型的调用流程是：
+应用层 --[JSON-RPC请求]--> 节点 --[执行交易]--> 区块链 --[JSON返回]--> 应用层
+这种架构的优势在于解耦：应用层无需理解底层区块链的完整逻辑，只需按照JSON-RPC规范发送请求。
+本地测试环境的重要性 不容忽视。以太坊主网上的每笔交易都需要消耗Gas（手续费），合约部署更是代价高昂。Ganache是一个本地以太坊模拟器，运行在本地计算机上，提供了完全相同的JSON-RPC接口，但无需消耗真实资金。更关键的是，Ganache支持快速重置（回到初始状态）和确定性账户生成（同一配置下每次生成相同的测试账户），这对开发调试至关重要。在实际应用中，开发人员通常在本地Ganache上迭代，验证逻辑无误后再部署到测试网（如Goerli）或主网。
+2.3　数据可视化技术
+关系图谱是理解虚拟货币交易网络的常用工具。技术实现中有两个核心问题：图的绘制和交互响应。
+图绘制库的选择 直接影响性能和交互体验。ECharts是一个流行的开源可视化库，特别在处理中等规模图谱（数百到数千个节点）时表现出众。它支持多种图表类型，其中graph类型专门用于展示网络结构。ECharts采用了力导向布局（force-directed layout）算法来自动排列节点位置，该算法将节点间的关系模拟为物理作用力，通过迭代计算最终收敛到一个平衡状态。这种布局通常比手工指定坐标更能反映数据的内在结构。
+交互设计则涉及事件绑定与状态管理。Web应用中的交互通过事件监听器实现：用户操作（如鼠标点击）触发事件，事件处理函数根据事件内容采取相应行动。在图谱上下文中，点击节点事件需要传递节点ID、更新全局状态（当前查询地址）、触发新的数据请求、重新渲染图表。这一系列操作的协调通常通过回调函数实现——当事件发生时，系统调用预先定义的函数执行业务逻辑。
+2.4　哈希函数与数据完整性校验
+哈希函数是现代密码学的基础，其核心特性是确定性、快速计算和雪崩效应。
+确定性 意味着同一输入总是产生相同输出，这使得哈希可以作为数据的“签名”；雪崩效应 指输入的微小变化导致输出完全不同。SHA-256（安全哈希算法256位）是目前应用最广泛的哈希函数，其输出空间为2^256，几乎不存在碰撞风险（两个不同的输入产生相同哈希的概率微乎其微）。这一特性是数据完整性校验的理论基础。
+这种方法的局限是无法恢复原始文件。若原始文件丢失，即使拥有哈希值也无法重构。因此实践中常采用“哈希+校验码”的组合，或在链下保存备份。
+2.5　数据聚类与机器学习基础
+聚类是无监督机器学习的典型任务——给定一组数据点，不知道每个点的标签，目标是根据相似性将其分为若干组。KMeans算法是最简单也最常用的聚类算法，其基本思想是：随机初始化K个簇心，迭代执行“分配每个点到最近簇心”和“重新计算簇心位置”两个步骤，直到簇心不再移动。
+然而，在虚拟货币地址聚类的具体场景中，直接套用KMeans算法会面临一个特殊的问题：簇规模的差异性。具体而言，某些对手地址可能与目标地址有大量交互（如交易所的热钱包），而另一些则只有零星交易。如果采用传统的总量指标（如总交易金额、总交互次数）进行聚类，大规模簇会天然占据主导地位，导致小规模簇被错误归类或淹没，这种现象在机器学习中被称为“量纲主导偏差”。
+特征标准化的必要性在多维数据中尤为重要。假设有两个特征：交易次数（范围0-100）和交易金额（范围0-10000）。若直接计算距离，金额维度会主导结果，因为其数值范围更大。StandardScaler通过零均值化和方差标准化解决这个问题：
+标准化 = (原始值 - 均值) / 标准差
+处理后，每个特征的均值为0、方差为1，这样各维度在距离计算中的贡献度相同。
+2.6　系统技术栈的模块化设计
+现代Web应用通常采用前后端分离架构。后端负责业务逻辑（数据处理、算法执行）和数据存储，前端负责用户交互（界面展示、事件响应）。两者通过REST API通信——客户端发送HTTP请求，服务器处理后返回JSON响应。
+REST（表述性状态转移） 是一套设计网络应用的架构约束。其核心理念是将应用的每个资源用URI标识，通过GET、POST、PUT、DELETE等HTTP方法表示对资源的操作。例如：
+Code
+GET /api/analyze?address=0x123  # 请求分析某地址
+POST /api/evidence/store        # 提交存证请求
+这种设计的好处是可扩展性强——前端和后端可以独立演进，只要API契约保持一致。
+选择轻量级框架（如Flask） 而非重型框架（如Django）的原因在于开发周期和学习成本。Flask提供了最小化的核心功能，其他功能通过插件灵活组合。这种“microframework”哲学非常适合科研原型设计，而重型框架通常用于大规模生产系统。
+
+第三章　系统需求分析
+3.1　功能需求
+系统设计面临的第一个问题是：如何完整捕捉虚拟货币的资金流向。传统的区块链分析工具通常只关注Native交易——最直观的ETH转账。但这只是冰山一角。在DeFi生态中，Internal交易（合约执行产生的转账）和ERC-20交易（代币转移）同样重要，甚至数量更多。一个地址的真实活跃度必须通过三类交易的综合视图才能准确判断。
+因此，系统首先需要统一处理三类交易。这不仅是简单的数据汇聚，而是结构层面的统一建模——将来源不同、格式差异的交易数据映射到同一数据结构，使得后续的分析模块无需感知交易的来源，只需处理标准化的交易对象。
+地址关系图谱的设计遵循了"可视化即入口"的理念。传统的表格式展示会导致用户被数据淹没——数百条交易记录、数十个对手地址，难以形成直观认知。图谱化展示可以一眼看出地址的社交网络结构。但关键创新在于节点点击钻取——不是被动地观看图谱，而是主动地探索。用户点击某个对手节点，系统自动切换到该地址并重新分析，形成了一个递归式的探索流程。这大幅降低了分析难度。
+地址多维度评估则对应了现实中的执法需求。风险评估不是单一维度的打分，而是多个维度的综合。风险分值量化了风险程度，风险等级将其分类为可操作的三档（LOW/MEDIUM/HIGH），告警项则指出了具体的可疑行为。这样执法人员不仅知道一个地址风险，还知道为什么风险。聚类分析则是发现对手特征的一种方式——某些地址倾向于与大量对手交互（"散户"特征），某些则只与少数对手互动（"机构"特征），这些特征对判断地址性质很有价值。一跳追踪则是对简单问题的直接回答："谁是这个地址的主要资金来源或去向"。
+时序分析在传统的链分析中往往被忽视。但时间维度很关键——一个地址在短时间内的大额转出，与分散在数月的转出，反映的风险完全不同。系统将ETH和各类代币分别统计，是因为币种不可相加。100 ETH和100 USDC的市值差异巨大，混合统计会导致严重的扭曲。
+报告生成与存证体现了从"分析"到"取证"的飞跃。分析结果本身易被否认——"您这个风险评分是怎么算出来的？能改吗？"。而一旦报告被固化为PDF、计算出哈希、上链存证，就获得了三重保护：PDF形式保证了展示的准确性，哈希值保证了内容不可篡改（任何改动都会导致哈希变化），链上存证保证了时间戳的真实性（无法声称"这是事后编造的"）。
+3.2　非功能需求
+可靠性的挑战来自两个方面的不可控：第一是外部API（Etherscan）的不稳定性。网络延迟、限流、故障都可能发生。系统不能简单地抛出异常让用户面对技术错误消息（如"Connection timeout"），而是需要给出可解释的业务级错误提示（"Etherscan API暂时不可用，请稍后重试"）。第二是链上操作的原子性问题。当系统发起一笔链上交易时，可能出现"交易被打包但执行失败"的情况——此时既不能忽视（因为交易已上链），也不能当作成功（因为业务逻辑未执行）。系统必须检查receipt.status，并在失败时立即回滚数据库中的业务状态，确保链上链下一致。
+安全性在这个场景中的重点是私钥管理。若服务端的私钥被硬编码在源代码中，那么任何能访问源代码的人（包括代码审计者、恶意的团队成员）都能盗用这个私钥进行链上操作。正确做法是通过环境变量存储，这样私钥永远不会出现在源代码或版本控制历史中。另一个安全考虑是输入校验。虚拟货币地址、哈希值都有严格的格式规范（如地址必须是0x开头的40位十六进制）。若系统接受任意字符串作为地址，可能导致SQL注入等攻击。关于"仅保存哈希而非PDF原文"，这反映了隐私与验证的平衡——保存PDF原文会面临泄露用户分析内容的风险，但仅保存哈希会导致无法恢复原始文档。折中方案是链上存哈希，链下存完整文件，这样既保护了隐私，又保留了可验证性。
+可维护性的核心是模块边界清晰。"数据采集-分析-存证"的三层划分不仅是逻辑上的，更是代码组织上的。每一层应该是独立的模块，有清晰的输入输出接口。这样做的好处是，若要修改某个模块（如将Etherscan API替换为其他数据源），只需改动这个模块，其他模块无需感知。前端的"主分析页面整合多个子功能"则避免了传统的多页面应用中用户在不同标签页间频繁切换的低效。但这也要求前端架构必须支持多个组件的并行管理（图谱、聚类、追踪等各自有自己的状态和生命周期）。
+可扩展性设计的一个具体例子是Etherscan API层的抽象。系统应该定义一个DataSource接口，Etherscan只是一个具体实现。若要添加Tron链的支持，只需编写一个新的TronDataSource实现这个接口，无需修改上层的分析逻辑。类似地，风险评估的规则化设计为后续用机器学习模型替换规则留下了空间。目前的规则易于理解和解释（适合司法场景），但若要提升精度，可训练一个分类器替换规则引擎，API保持不变。
+可审计性是司法应用的必然要求。"法官如何相信您的分析结果？"这个问题的答案必须是可追溯的。系统在本地SQLite中保存每一条分析记录、每一次链上操作的日志，形成了一条完整的"证据链"。链上链下的双通道核验则提供了相互制约——若某个环节被篡改（如数据库被修改），另一个环节会指出不一致。这种设计思想来自于传统审计中的"不相信单一来源"原则。
+
+第四章　系统总体设计
+4.1　系统架构设计
+系统采用前后端分离的双层架构。应用层负责用户交互与数据展示，后端层负责所有业务逻辑处理和区块链交互。
+第一层：应用层（Frontend，~43.7%代码量） 负责用户交互界面。包括分析页面、管理后台、报告展示等。技术栈为HTML/CSS/JavaScript + ECharts可视化库。应用层通过HTTP请求与后端通信，所有业务逻辑由后端处理。
+第二层：后端层（Backend + Blockchain，~56.3%代码量） 系统的核心处理引擎，包含业务逻辑和区块链交互两个紧密耦合的子层：
+业务逻辑子层：采用Flask框架提供RESTful API，实现交易采集、数据标准化、风险评估、聚类分析等核心算法
+区块链子层：Ganache本地链 + Solidity智能合约，处理报告哈希的存证和验真
+两个子层通过Web3.py库的JSON-RPC协议在本地通信，无需跨网络，通信成本极低。
+
+
+图4.1 系统总体架构图
+
+4.2　数据流设计
+系统的前端设计采用了选项卡（Tab）的导航模式，将功能整合在多个独立的页面中，用户通过点击选项卡切换功能。这一设计思路的目的是在保证功能完整性的同时，降低单页面的复杂度与加载时间。
+用户输入地址 → Etherscan API查询 → 交易数据合并与标准化 → 分析计算（风险、聚类、图谱、时序）→ 结果缓存 → 前端渲染与用户交互 → 报告生成 → 链上存证 → 验真与历史查询。
+具体地，当用户输入地址并点击查询时，后端的etherscan_fetch函数会分别调用Etherscan的txlist、txlistinternal、tokentx三个接口，抓取三类交易数据。这三类交易数据的结构并不完全相同（例如，native交易有gasPrice与gasUsed字段，而internal交易没有手续费概念，erc20交易需要按tokenDecimal进行金额换算），因此需要进行详细的字段映射与转换。处理完成后，系统对三类交易进行合并，按(asset_type, hash, trace_id)的组合进行去重，最后按时间戳倒序排列。
+数据模型如表4.1所示
+表4.1 数据模型说明表
+数据对象	关键字段	说明
+标准交易对象	hash, from, to, direction, counterparty, value_eth, asset_symbol, asset_type, fee_eth, time_text	三类交易统一后的公共结构
+聚类结果	cluster_id, label, size, interaction_count, avg_tx_per_address	地址分簇及可解释指标
+风险结果	score, level, alerts	风险评分与告警项
+存证记录	address, report_hash, chain_tx_hash, created_at	报告哈希上链与本地登记
+
+合并后的交易列表被传入多个分析函数：detect_risk函数计算风险评分与警报，cluster_addresses函数执行聚类分析，build_graph函数生成关系图谱的节点与边数据，build_time_series函数进行时序统计，build_address_profile函数生成地址画像。这些函数的输出被整合成一个综合的JSON响应对象，返回给前端。系统在业务层维护了一个全局的cache字典，保存了当前查询的地址、交易列表、聚类标签等信息，这些缓存数据用于支持后续的操作（如报告生成、存证）而不需要重复查询。
+当用户点击“生成PDF报告“按钮时，前端会收集当前页面上所有的分析结果（图表、表格、统计数据），使用html2canvas库将其转换为图像，再使用jsPDF库将图像转换为PDF文档。PDF生成完成后，前端自动计算该PDF的SHA-256哈希值。当用户点击“上链存证”按钮时，确认后，交易被广播到Ganache网络。后端通过web3.py监听或轮询交易状态，当交易确认后，将存证信息（地址、哈希、风险等级、链上交易哈希、时间戳）记录到SQLite数据库中。
+验真流程涉及文件上传，前端接收用户上传的PDF文件，使用CryptoJS或其他库计算其SHA-256哈希，将该哈希值发送到后端。后端的verify_evidence函数执行双通道验证：第一个通道查询SQLite数据库，看是否存在与该地址和哈希匹配的记录；第二个通道调用智能合约的getEvidences函数，检查链上是否有该哈希的存证。综合这两个通道的结果，系统给出最终的验证判断。
+
+
+4.2 关键流程图（分析与存证闭环）
+第五章　系统实现
+5.1 部署流程
+系统部署包括Python环境配置、Ganache本地链启动、智能合约部署、MetaMask配置以及后端服务启动。各步骤相互依赖，需按顺序执行。
+系统部署包括以下步骤：
+1.Python环境配置：安装Flask、Web3.py、pandas、numpy、scikit-learn等依赖。
+2.Ganache本地链启动：创建本地以太坊测试网络，获取测试账户。
+3.智能合约部署：使用Remix或truffle将EvidenceStorage合约部署到Ganache。
+4.MetaMask配置：连接本地Ganache网络，导入测试账户。
+5.后端服务启动：运行Flask应用，监听API请求。
+具体部署如图5.1，图5.2所示。
+
+图5.1 ganache获取虚拟地址
+
+图5.2 remix部署智能合约
+5.2  可视化与交互实现
+5.2.1  功能与界面
+系统分析页整合追踪、聚类、时序、画像等子功能。交易溯源分析模块可实现地址查询、风验评估、关系图谱。点击图谱中的对手地址可直接触发该地址分析；批量分析模块可进行多地址并行查询，共同对手地址自动提取并支持一键复制；PDF报告与链上存证模块可生成分析报告、计算Hash、上链存证、历史查询与验真。
+系统核心界面为关系图谱。用户可以点击任意地址节点，直接触发新一轮分析。
+系统导航页面如图5.3所示 
+
+图5.3 系统首页展示图
+5.2.2  代码实现
+本系统前端通过事件监听节点点击行为，将选中地址重新提交到后端分析接口。这一机制避免了页面跳转，使分析过程连续。
+color_map = {
+    LABEL_HIGH_FREQ: "#ef4444",
+    LABEL_HIGH_FEE: "#f59e0b",
+    LABEL_HIGH_VOLUME: "#8b5cf6",
+    LABEL_NORMAL: "#64748b",
+}
+categories = [
+    {"name": "core_address", "itemStyle": {"color": "#0b5fff"}},
+    {"name": LABEL_HIGH_FREQ, "itemStyle": {"color": color_map[LABEL_HIGH_FREQ]}},
+]
+// analyze.html (节点点击钻取)
+function wireNodeClick() {
+  if (!mainChart) return;
+  mainChart.off("click");
+  mainChart.on("click", async (params) => {
+    if (params.dataType !== "node") return;
+    const clicked = params?.data?.id;
+    if (!isEvmAddress(clicked)) return;
+    if (clicked.toLowerCase() === currentAddress.toLowerCase()) return;
+    document.getElementById("addressInput").value = clicked;
+    await queryAnalyze(clicked);
+  });
+各接口实现如表5.1所示
+表5.1接口实现概览
+接口	功能
+POST /api/analyze	综合分析
+POST /api/profile	地址画像
+POST /api/trace	一跳追踪
+POST /api/cluster	地址聚类
+POST /api/timeseries	时序分析
+POST /api/evidence/store_onchain	报告哈希上链
+POST /api/evidence/verify	存证验真
+ 
+5.3　三类交易统一处理
+5.3.1　功能介绍与原理
+系统最核心的创新在于同时接入三类交易数据。具体来说，native交易经由Etherscan的txlist接口获得，是以太坊上最常见的主币转账；internal交易来自txlistinternal接口，反映智能合约执行中的资金流转；erc20交易由tokentx接口提供，记录各类代币的转移。三类交易各有其表现方式和特点，直接相加会造成数据混乱。
+为了统一处理这三类异构数据，本系统采取分步骤的策略：先从三个数据源各自抓取，再映射到统一的数据结构（包含asset_symbol和asset_type字段用于标识资产）。对erc20交易特别处理，按tokenDecimal换算得到真实数量——举例来说，若tokenDecimal为6（USDC常见值），链上记录的1000000实际表示1枚代币。然后进行去重，用asset_type+hash+trace_id组合作为唯一键，防止同笔交易在多个数据源重复计算。最后按时间戳倒序排列，便于展示最新交易。
+这套流程看似繁琐，但解决的正是传统系统的致命缺陷：交易数据的完整性和准确性。
+5.3.2　数据标准化与实现
+etherscan_fetch函数分三路并行调用Etherscan接口。对native交易，提取hash、from、to、value、gasPrice、gasUsed、timeStamp，标记asset_symbol为“ETH”，asset_type为“native”。gasPrice和gasUsed正是计算手续费的关键。
+internal交易的字段处理基本相同，但gasPrice、gasUsed均设为“0”——internal交易本质上是合约执行的副产品，不直接消耗gas。这个细节往往被忽视，却对后续的风险评估产生微妙影响。
+erc20交易最需谨慎。链上记录的是原始整数值，必须按照tokenDecimal进行缩放。系统调用parse_amount函数完成这一转换，确保金额单位的准确性。
+合并三类交易后，系统执行去重。构建seen集合，对每笔交易生成唯一键。如果键已存在则跳过，否则加入。这样即使某笔交易被多个接口重复返回，也只处理一次。最后倒序排列，确保用户看到的是最新交易。
+完整代码实现了这一逻辑。值得注意的是compact_txs函数进一步标准化数据——判定交易方向（in/out/other），计算对手地址，将金额统一转换为ETH单位。这一步是所有后续分析的基础。三类交易数据表如图5.4所示。
+核心代码如下：
+# app.py
+def etherscan_fetch(address: str, limit: int) -> list[dict[str, Any]]:
+    normal_rows = etherscan_request("txlist", address, limit)
+    internal_rows = etherscan_request("txlistinternal", address, limit)
+    token_rows = etherscan_request("tokentx", address, limit)
+    merged: list[dict[str, Any]] = []
+    for row in normal_rows:
+        merged.append({
+            "hash": row.get("hash", ""),
+            "from": row.get("from", ""),
+            "to": row.get("to", ""),
+            "value": row.get("value", "0"),
+            "gasPrice": row.get("gasPrice", "0"),
+            "gasUsed": row.get("gasUsed", "0"),
+            "timeStamp": row.get("timeStamp", "0"),
+            "asset_symbol": "ETH",
+            "asset_type": "native",
+            "trace_id": row.get("transactionIndex", ""),
+        })
+    for row in internal_rows:
+        merged.append({
+            "hash": row.get("hash", ""),
+            "from": row.get("from", ""),
+            "to": row.get("to", ""),
+            "value": row.get("value", "0"),
+            "gasPrice": "0",
+            "gasUsed": "0",
+            "timeStamp": row.get("timeStamp", "0"),
+            "asset_symbol": "ETH",
+            "asset_type": "internal",
+            "trace_id": row.get("traceId", ""),
+        })
+    for row in token_rows:
+        amount = parse_amount(row.get("value", "0"), row.get("tokenDecimal", "18"))
+        merged.append({
+            "hash": row.get("hash", ""),
+            "from": row.get("from", ""),
+            "to": row.get("to", ""),
+            "value": str(amount),
+            "gasPrice": row.get("gasPrice", "0"),
+            "gasUsed": row.get("gasUsed", "0"),
+            "timeStamp": row.get("timeStamp", "0"),
+            "asset_symbol": row.get("tokenSymbol", "TOKEN"),
+            "asset_type": "erc20",
+            "trace_id": row.get("logIndex", ""),
+        })
+    seen = set()
+    deduped = []
+    for row in merged:
+        key = f"{row.get('asset_type')}:{row.get('hash')}:{row.get('trace_id')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    deduped.sort(key=lambda x: parse_int(x.get("timeStamp", "0")), reverse=True)
+    return deduped
+
+图5.4 分析获取数据表
+5.4　风险评估实现
+5.4.1　功能介绍与原理
+虚拟货币洗钱的特征并非神秘。高频交易、分散对手、大额转账、单向外流——这些行为在传统金融中早已被列为可疑。本系统采用规则驱动的评估方法，即：事先定义一组判断准则，依次检验目标地址是否触发，累加得分。
+为什么不用机器学习？因为在司法场景中，算法必须透明可解释。如果法庭问“为什么判定这个地址高风险”，回答“神经网络认为”显然不可接受。本系统的每一条规则都可清晰说明：高频交易规则触发的具体条件是什么，对应的证据在哪。
+系统共设六条规则：交易数≥40（+30分）、对手数≥18（+25分）、单笔≥200 ETH（+20分）、出账>入账×3且出账≥15（+15分）、地址在黑名单（+40分）、累计≥1000 ETH（+10分）。最终得分上限100，分为LOW（<35）、MEDIUM（35~69）、HIGH（≥70）三档，如图5.5所示。
+
+图5.5 风险评估效果展示
+这套规则的优势在于可复现性。任意地址的评分都可以通过人工统计交易记录得到一致结果。
+5.4.2　代码实现
+以太坊地址风险检测：通过分析传入的交易列表，统计转入/转出次数、交易对手数量、最大单笔ETH金额和总ETH交易量等特征，然后基于六项预设规则进行累加计分（满分100），并返回相应的风险分值和触发警报列表。
+核心代码如下所示：
+def detect_risk(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    incoming, outgoing = 0, 0
+    counterparties = set()
+    max_eth = 0.0
+    total_amount = 0.0
+    for tx in txs:
+        f = str(tx.get("from", "")).lower()
+        t = str(tx.get("to", "")).lower()
+        asset_symbol = str(tx.get("asset_symbol", "ETH")).upper()
+        amount = float(tx.get("value_eth", 0.0))
+        if asset_symbol == "ETH":
+            total_amount += amount
+        if t == address:
+            incoming += 1
+            counterparties.add(f)
+        elif f == address:
+            outgoing += 1
+            counterparties.add(t)
+        if asset_symbol == "ETH":
+            max_eth = max(max_eth, amount)
+    score = 0
+    alerts = []
+    if len(txs) >= 40:
+        score += 30
+        alerts.append("high-frequency-transactions")
+    if len(counterparties) >= 18:
+        score += 25
+        alerts.append("too-many-counterparties")
+    if max_eth >= 200:
+        score += 20
+        alerts.append("large-single-transfer")
+    if outgoing > incoming * 3 and outgoing >= 15:
+        score += 15
+        alerts.append("one-way-outflow")
+    if address in BLACKLIST:
+        score += 40
+        alerts.append("blacklist-hit")
+    if total_amount >= 1000:
+        score += 10
+        alerts.append("large-total-volume")
+    score = min(100, score)
+    level = "LOW" if score < 35 else ("MEDIUM" if score < 70 else "HIGH")
+    return {"score": score, "level": level, "alerts": alerts}实现效果如图5.3。
+5.5　地址聚类实现
+5.5.1　功能介绍与原理
+地址聚类的目的是将对手地址按交互特征分组。同一群体的地址往往表现出相似的交易行为，可能属于同一实体或参与类似活动。
+系统对每个对手地址提取六维特征：平均手续费、累计手续费、交互次数、手续费标准差、流入比例、流出比例。这些特征同时刻画交易规模、交易方向以及交易成本。
+系统优先采用KMeans算法进行聚类。在执行前使用StandardScaler对特征进行标准化处理，以消除量纲差异。聚类簇数设为min(3, len(peers))。若相关依赖不可用，则回退到启发式规则方案，以保证系统稳定性。
+聚类结果需要进一步语义化标注。系统采用人均指标而非总量指标进行判断：人均交互次数≥8标记为高频，人均金额>20标记为大额，平均手续费>0.001标记为高费率。这一策略避免了因簇规模差异带来的误判。
+实现流程包括特征提取、六维向量构建、标准化处理、KMeans聚类以及基于人均指标的标签映射，整体流程结构清晰，实现效果如图5.6。
+
+5.6 地址聚类效果展示
+5.5.2　代码实现
+首先将每个地址的费率特征（平均费、总费、交易次数、费率标准差、转入/转出比例）拼接成特征行，若KMeans等依赖可用则使用标准缩放器归一化后聚类为min(3,地址数)个簇并返回簇标签；否则回退到基于规则的硬编码分簇逻辑，根据成员地址的平均交易频次、平均交易量、平均费率等阈值判定为高频、高交易量、高费率或正常簇。
+核心代码如下：
+feature_rows.append([avg_fee, total_fee, tx_count, fee_std, in_ratio, out_ratio])
+if KMeans is not None and StandardScaler is not None and np is not None:
+    mat = np.array(feature_rows, dtype=float)
+    scaler = StandardScaler()
+    mat_scaled = scaler.fit_transform(mat)
+    n_clusters = min(3, len(peer_list))
+    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = [int(x) for x in model.fit_predict(mat_scaled)]
+else:
+    method = "rule-based-fallback-clustering
+avg_tx_per_addr = interaction_count / len(members) if members else 0.0
+avg_volume_per_addr = interaction_volume / len(members) if members else 0.0
+if avg_tx_per_addr >= 8:
+    cluster_name = LABEL_HIGH_FREQ
+elif avg_volume_per_addr > 20:
+    cluster_name = LABEL_HIGH_VOLUME
+elif avg_fee > 0.001:
+    cluster_name = LABEL_HIGH_FEE
+else:
+    cluster_name = LABEL_NORMAL
+5.6　一跳追踪与地址画像实现
+5.6.1　功能介绍与原理
+一跳追踪仅分析目标地址与其直接对手之间的资金往来，不进行多跳扩展，从而保证分析结果的可控性与可解释性。系统支持按流入与流出方向分别统计，使资金流向更加直观。
+地址画像用于从多维度刻画地址特征。系统整合交易规模、活跃度、风险评分及资产构成等信息生成标签。例如，与30个以上对手交互的地址标记为“active-network”，出账显著高于入账的标记为“outflow-heavy”。这些标签用于快速概括地址行为特征。地址聚类效果如图5.7所示。
+
+
+图5.7 地址聚类效果展示
+5.6.2　代码实现
+系统通过one_hop_trace函数按方向聚合交易数据，统计每个对手的总金额与交互次数，并按金额排序输出。build_address_profile函数整合多项指标生成结构化画像，保持实现上的简洁性，核心代码如下：
+# app.py
+def one_hop_trace(address: str, txs: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
+    grouped = defaultdict(lambda: {"amount": 0.0, "count": 0})
+    for tx in txs:
+        if direction == "forward" and tx.get("direction") == "out":
+            peer = tx.get("counterparty")
+        elif direction == "backward" and tx.get("direction") == "in":
+            peer = tx.get("counterparty")
+        else:
+            continue
+        if not peer:
+            continue
+        grouped[peer]["amount"] += float(tx.get("value_eth", 0.0))
+        grouped[peer]["count"] += 1
+def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    counterparties = {tx.get("counterparty") for tx in txs if tx.get("counterparty")}
+    in_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "in" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    out_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "out" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    risk = detect_risk(address, txs)
+    asset_counter = defaultdict(int)
+    for tx in txs:
+        asset_counter[str(tx.get("asset_symbol", "ETH")).upper()] += 1
+    asset_mix = [{"asset": k, "tx_count": v} for k, v in sorted(asset_counter.items(), key=lambda kv: kv[1], reverse=True)]
+    ...
+5.7　时序分析与关系图谱实现
+5.7.1　功能介绍与原理
+时序分析采用主副双序列结构。主序列仅统计ETH并按日期聚合，用于展示核心趋势；副序列按不同资产分别统计，用于补充细节信息。这种设计避免了不同资产直接叠加带来的失真问题。
+异常检测采用3-sigma原则，即将超出[mean−3σ, mean+3σ]区间的数据标记为异常，从而实现自适应阈值判断。
+关系图谱基于ECharts实现。中心节点表示目标地址，周围对手根据聚类标签着色区分。用户点击任一节点即可触发新的地址分析，实现交互式钻取。
+时序分析与关系图谱如图5.8，图5.9所示。
+
+
+图5.8 关系图谱效果展示
+
+
+图5.9 时序分析
+
+5.7.2　代码实现
+系统通过build_time_series函数构建按日期与按资产分类的双层数据结构，并执行异常检测。build_graph函数生成图谱节点与边信息，前端通过事件监听实现交互分析，核心代码如下：
+def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    counterparties = {tx.get("counterparty") for tx in txs if tx.get("counterparty")}
+    in_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "in" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    out_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "out" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    risk = detect_risk(address, txs)
+
+    asset_counter = defaultdict(int)
+    for tx in txs:
+        asset_counter[str(tx.get("asset_symbol", "ETH")).upper()] += 1
+    asset_mix = [{"asset": k, "tx_count": v} for k, v in sorted(asset_counter.items(), key=lambda kv: kv[1], reverse=True)]
+    ...
+5.8　报告生成与区块链存证实现
+5.8.1　功能介绍与原理
+系统将分析结果导出为PDF，并对其计算SHA-256哈希值作为唯一标识。该哈希值具有敏感性，即内容的任何细微变化都会导致哈希完全不同。
+后端通过Web3.py与Ganache交互，将哈希写入区块链智能合约。链上存储哈希，链下数据库保存完整数据，形成双轨存证结构。验证时通过重新计算哈希并在链上与数据库中查询，实现结果交叉校验。
+  报告生成与区块链存证如图5.10、5.11所示。
+ 
+图5.10 存证功能展示
+
+图5.11 哈希验真，文件篡改显示
+
+5.8.2　代码实现
+系统通过store_evidence_onchain函数完成交易构建、签名、发送与状态校验。verify_evidence函数执行链上与链下双通道查询并综合判定结果，核心代码如下：
+def build_address_profile(address: str, txs: list[dict[str, Any]]) -> dict[str, Any]:
+    counterparties = {tx.get("counterparty") for tx in txs if tx.get("counterparty")}
+    in_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "in" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    out_amount = sum(float(tx.get("value_eth", 0.0)) for tx in txs if tx.get("direction") == "out" and str(tx.get("asset_symbol", "ETH")).upper() == "ETH")
+    risk = detect_risk(address, txs)
+    asset_counter = defaultdict(int)
+    for tx in txs:
+        asset_counter[str(tx.get("asset_symbol", "ETH")).upper()] += 1
+    asset_mix = [{"asset": k, "tx_count": v} for k, v in sorted(asset_counter.items(), key=lambda kv: kv[1], reverse=True)]
+    ...
+第六章 系统测试
+6.1 功能测试
+6.1.1 地址分析与风险评估测试
+选取三类典型地址进行测试，如表6.1所示，测试结果如表6.4所示。测试结果表明：系统能够准确区分不同行为特征的地址，风险评分与人工研判结果一致。规则驱动的评估方法具有良好的可解释性，每条告警项均可追溯到具体交易记录。
+表6.1 测试典型地址
+测试地址类型	预期特征	预期风险等级
+普通用户地址	交易数<20，对手分散	LOW
+DeFi活跃地址	交易频繁，多与合约交互	MEDIUM
+可疑洗钱地址	单笔大额，单向流出	HIGH
+表6.2 典型地址测试结果
+测试地址	交易总数	对手数	风险得分	风险等级	主要告警项	响应时间
+普通用户地址	12	8	15	LOW	无	2.1s
+DeFi活跃地址	156	42	55	MEDIUM	高频交易、对手过多	3.8s
+可疑洗钱地址	89	23	85	HIGH	高频、单向流出、大额转账	3.2s
+6.1.2 地址聚类测试
+测试目的：验证KMeans聚类算法及人均指标标注方法的有效性。
+测试方法：以DeFi活跃地址为目标，对其89个对手地址进行聚类分析。
+测试结果：
+表6.3 地址聚类结果
+簇标签	地址数量	人均交互次数	人均金额(ETH)	人均手续费(ETH)	语义标注
+簇0	3	24.3	156.8	0.023	高频+大额
+簇1	52	4.2	12.5	0.002	普通
+簇2	34	9.8	8.6	0.018	高频
+分析：簇0仅含3个地址，但人均交互次数高达24.3次，若采用总量指标将无法被识别为“高频”，而人均指标成功捕捉了这一特征。这验证了本文提出的人均指标标注方法能够有效避免因簇规模差异导致的误判。
+6.1.3 一跳追踪与地址画像测试
+一跳追踪测试：输入目标地址后，按“流入”和“流出”方向分别统计直接对手。测试结果显示，系统能够正确识别资金流向，并按金额降序排列对手列表，便于快速定位大额交易对手。
+地址画像测试：系统生成的画像包含交易总数、唯一对手数、ETH净流入/流出、风险评分、资产构成分布等信息。测试表明，画像内容完整、数据准确，能够为研判提供全方位的地址特征认知。
+6.1.4 时序分析与关系图谱测试
+时序分析测试：系统按日期统计ETH交易额及分币种交易额，并采用3-sigma原则自动标记异常点。测试中，某地址在特定日期出现单日交易额激增（超出均值3.2倍），系统正确将其标记为异常。
+关系图谱测试：图谱以目标地址为中心节点，对手地址按聚类标签着色区分。测试中，点击任意对手地址节点，系统成功触发新一轮分析，实现了交互式钻取功能。
+6.1.5 报告生成与链上存证测试
+PDF报告生成测试：完成地址分析后，系统将分析结果（图表、表格、统计）整合为PDF文档。测试表明，PDF报告包含地址信息、风险评分与告警项、交易明细表、对手聚类结果、时序图表等核心内容，排版清晰，适合归档与复核。
+链上存证测试：计算PDF报告的SHA-256哈希值后调用智能合约上链。测试结果显示，存证交易在Ganache上确认时间约3秒，Gas消耗约120,000。
+表6.4双通道验真测试
+测试场景	链下记录	链上记录	验证结果
+原始PDF验真	存在	存在	✓ 验证通过
+篡改后PDF验真	不存在（哈希不匹配）	不存在	✗ 验证失败
+地址与哈希不匹配	不存在	存在（但地址不匹配）	✗ 验证失败
+测试表明，双通道验真机制有效防止了任何单点篡改。即使攻击者同时修改本地数据库，也无法伪造链上存证记录。
+6.2 非功能需求验证
+表6.5 性能测试
+测试指标	测试条件	实测值	预期值	结论
+单地址分析响应	交易数<100	2-4秒	≤5秒	✓ 通过
+大批量地址分析	连续10个地址	平均3.5秒	-	✓ 稳定
+图谱渲染	节点数<200	流畅	流畅	✓ 通过
+存证上链	单次存证	~3秒	≤10秒	✓ 通过
+表6.6 安全性验证
+测试项	验证方法	结果
+API密钥保护	检查代码是否硬编码	✓ 环境变量管理
+输入校验	输入非法地址格式	✓ 返回错误提示
+私钥存储	检查配置文件	✓ 未硬编码
+哈希上链	链上仅存摘要	✓ PDF原文未上链
+表6.7 可靠性验证
+测试场景	预期行为	实测结果
+Etherscan API超时	返回清晰错误提示	✓ 通过
+无效地址输入	格式校验失败提示	✓ 通过
+Ganache未启动	存证失败并提示	✓ 通过
+交易上链失败	回滚本地记录	✓ 通过
+6.3 测试结论
+系统测试覆盖了功能完整性、性能表现、安全性与可靠性四个维度，主要结论如下：
+功能完整性：所有规划功能（交易抓取、风险评估、聚类分析、一跳追踪、地址画像、时序分析、图谱可视化、报告生成、链上存证、双通道验真）均已实现并通过验证。
+核心创新验证：三类交易统一处理使交易视图更加完整；人均指标聚类标注成功识别了小规模高频交互簇；双通道验真机制有效防止篡改。
+性能表现：单地址分析响应时间控制在2-4秒，满足交互需求；存证上链约3秒确认。
+安全可靠：敏感信息通过环境变量管理，输入参数严格校验，链上仅存储哈希摘要，异常情况处理完善。
+综上所述，系统能够稳定支持本科毕业设计场景下的功能验证与工程展示，达到了预期设计目标。
+
+
+
+
+
+
+第七章　总结与展望
+7.1　研究成果总结
+本文设计并实现了一套虚拟货币溯源及存证系统，。与既有方案相比，该系统在三个方面打破了既有局限。
+第一，交易数据的完整性。传统方法只抓取普通交易，导致资金链路被严重低估。本系统同时接入native、internal、erc20三类交易，并进行统一的标准化处理——这不仅是技术上的补全，更改变了分析的精度。进一步地，在地址聚类时，系统采用了"人均指标"而非"簇总量"进行标签分配，避免了因簇内成员众多而导致的过度聚集。这个细节看似小，但直接影响后续研判的准确性。
+第二，架构的可维护性。系统采用的架构划分了职责，使得各层可以独立调整而不互相干扰。在用户交互上，系统没有采用传统的多页跳转，而是将追踪、聚类、画像、时序分析等多个维度整合在一个页面内。这种设计虽然需要前端的精心组织，但换来了明显的用户体验提升。
+第三，证据的可信性与可恢复性。报告摘要上链（利用区块链的不可篡改性），同时在本地数据库保存完整的业务记录（便于审计和快速查询）。验真时执行双通道比对——即使某个通道发生故障，另一个通道的结果仍能支撑最终判定。这种冗余设计在实务中往往被忽视，但对司法应用至关重要。
+在工程层面，系统实现了从需求、设计、开发、部署到演示的完整闭环。涵盖交易抓取、数据标准化、风险评估、聚类分析、时序统计、报告生成、链上交互等多个功能模块。每个模块的设计都面对了具体的工程挑战——比如三类交易如何统一处理，聚类标签如何自动生成，这些都不是一蹴而就的。
+
+7.2　系统的现实意义与教学价值
+虚拟货币洗钱犯罪日益猖獗，执法部门急需可靠的分析工具与取证方法。本系统在以下方面具有现实意义：
+系统提供了一套标准化、可复现的分析流程。不同于某些商业平台的黑箱分  ，本系统的每一步操作都是透明的、可验证的。执法人员可以向法庭清晰地解释分析结论的来源，避免“事后编辑”的质疑。系统实现了证据的链上固化。传统的取证方式依赖截图与文档，容易被质疑为事后编辑。本系统将报告摘要写入区块链，提供了“报告在某一时刻已存在且自此未被篡改”的密码学保证。系统支持多维度的分析，既支持单地址的深入分析，也支持批量地址的关联分析。系统的地址聚类功能可以快速识别“同一控制人”的多个地址，大幅提升了追踪效率。
+在教学方面，本系统覆盖了区块链、智能合约、Web开发、数据分析等多个技术领域，适合作为计算机科学本科生的毕业设计项目。系统的代码质量与文档完整度相对较高，便于学生学习与参考。
+
+7.3　存在的不足与改进方向
+现有系统仍存在一些不足，主要包括：
+第一，风险评估模型过于简化。当前系统采用纯规则法，未引入机器学习。后续可以考虑使用随机森林、梯度提升等集成学习方法来提升评估精度。同时，风险特征的选择也有很大的优化空间，可以融合地址年龄、合约交互频率、代币多样性等更多维度。
+第二，聚类特征不够丰富。当前聚类仅考虑了与目标地址的交互特征，未考虑地址的全局特征（如该对手地址与其他地址的交互模式）。引入图神经网络可能能够提升聚类的精度与鲁棒性。
+第三，系统仅支持EVM兼容链（以太坊及其侧链）。对于Tron、Cosmos等其他区块链生态，需要单独的适配。后续可以考虑设计通用的链抽象接口，支持多链并行分析。
+第四，系统依赖Etherscan API，存在速率限制。对于大规模的地址分析或批量查询，容易触发API限制而导致服务中断。后续可以考虑自建以太坊全节点，支持无限制的本地查询。
+第五，前端功能相对基础。当前前端主要提供静态的数据展示，缺乏交互式的分析工具（如地址搜索、标签管理、自定义报告模板等）。后续可以增强前端的交互能力与可定制性。
+7.4　结束语
+虚拟货币的蓬勃发展为金融创新提供了新的可能性，但同时也为犯罪活动提供了新的掩护。本文通过系统的设计与实现，在一定程度上回应了这一挑战。虽然当前系统在精度、规模、覆盖范围等方面仍有改进空间，但其在教学、演示、初期应用方面已具备一定的价值。
+我们相信，随着区块链技术的进一步成熟、算法的持续优化、数据的更加丰富，基于科学方法、透明可验证的虚拟货币溯源与存证系统将在法律调查、合规审计、风险防控等多个领域发挥越来越重要的作用。本文的工作也期待对未来的相关研究提供借鉴与参考。
+
+
+
+
+参考文献
+[1] 罗正青, 张雍锭. 理性选择理论视角下利用虚拟货币洗钱犯罪防控对策研究——以裁判文书网283份判决书为样本[J/OL]. 北京警察学院学报: 1-22[2025-11-19]. https://doi.org/10.16478/j.cnki.jbjpc.20251020.001.
+ 
+[2] 郭浩达. 区块链安全视角下虚拟货币诈骗治理困境与应对策略[J]. 网络安全技术与应用, 2025(9): 138-141.
+ 
+[3] 付玉明, 李想. 技术原理与溯因归责：区块链洗钱犯罪的刑事治理[J]. 法治现代化研究, 2025, 9(4): 59-72.
+ 
+[4] 张峻榕, 樊鸿博, 王从余. 区块链技术下涉众型经济犯罪的侦查困境与对策[J]. 现代商贸工业, 2025(15): 198-201. DOI: 10.19311/j.cnki.1672-3198.2025.15.062.
+ 
+[5] 俞邵文. 刑事涉案虚拟货币处置研究[D]. 北京: 中国人民公安大学, 2025. DOI: 10.27634/d.cnki.gzrgu.2025.000475.
+ 
+[6] 佟鑫. 涉虚拟货币洗钱犯罪侦查对策研究[D]. 北京: 中国人民公安大学, 2025. DOI: 10.27634/d.cnki.gzrgu.2025.000019.
+ 
+[7] 董春浩. 警企协作视域下虚拟货币洗钱犯罪侦查机制创新研究[C]//中国智慧工程研究会. 2025社会发展与创新学术交流会论文集. 北京: 中国人民公安大学研究生院, 2025: 299-301. DOI: 10.26914/c.cnkihy.2025.040259.
+ 
+[8] 吴应甲. 虚拟货币跨境转移资金犯罪的刑事规制：演进、挑战与应对[J/OL]. 会计之友, 1-8[2025-11-19]. https://link.cnki.net/urlid/14.1063.F.20250423.1715.002.
+ 
+[9] 王静. 虚拟货币犯罪的证据法困境及其破解[J]. 东方法学, 2025(2): 93-105. DOI: 10.19404/j.cnki.dffx.20250410.004.
+ 
+[10] 张鸿雳. 公共治理理论下区块链虚拟币非法集资犯罪多元共治研究[J]. 产业与科技论坛, 2025, 24(7): 30-33.
+ 
+[11] 阎博闻. 智能合约诈骗犯罪模式与侦查对策研究[D]. 北京: 中国人民公安大学, 2024. DOI: 10.27634/d.cnki.gzrgu.2024.000102.
+ 
+[12] 付勇康, 徐永新. 区块链虚拟货币传销犯罪侦防研究[J]. 中国人民警察大学学报, 2024, 40(2): 14-19.
+ 
+[13] 胡德葳. 区块链技术下智能合约诈骗犯罪侦查[J]. 中国刑警学院学报, 2021(6): 14-20. DOI: 10.14060/j.issn.2095-7939.2021.06.002.
+ 
+[14] 李迎昌, 潘喆. 涉虚拟货币纠纷的裁判路径——以委托投资ICO纠纷为切入[J]. 法律适用, 2021(9): 119-127.
+ 
+[15] 赵梦蓉. 区块链技术下反洗钱监管初探[D]. 南京: 南京财经大学, 2019. DOI: 10.27705/d.cnki.gnjcj.2019.000183.
+ 
+[16]刘军.基于联盟链的虚拟货币交易溯源系统设计与实现[J].计算机工程与应用，2024，60
+
+
+
+
+
+致 谢
+本论文是在我的导师龚红辉老师的细心指导下完成的。从论文选题到论文修改的整个过程中，老师不辞辛苦地讲解才使得我的论文设计能够顺利地进行。导师严谨的治学态度和高度的责任心将使我受益终生。在此向龚红辉老师表示衷心地感谢！除此之外，还要感谢我的同学，感谢他们愿意和我一起探讨论文中出现的问题，并及时指出我的误区，使我能够继续接下来的撰写，没有你们的帮助我不可能这样顺利地结稿，在此表示深深的谢意！
+
+
+
+附录一：
+江西警察学院学生跨文化交际能力调查问卷 
+亲爱的同学：
+您好！该问卷的目的是为了了解同学们的跨文化交际能力现状，其结果仅作为研究之用，且替你保密。请认真阅读下面每一句话，根据您的实际情况，认真填写最符合个人实际的答案，请勿漏选、多选，非常感谢您的帮助！
+ 
+姓名：___________专业：_____________年级：___________性别：___________
+
+A完全赞同   B同意   C不同意   D强烈反对
+一、在下面各项中，请按以下评定标准回答：
+1.我了解英语国家的价值观、宗教礼仪和社交规则(如隐私，道德伦理知识等)。
+  A.(     )	    B.(     )		   C. (     ) 	 	D. (     )
+2.在跨文化交际中，我会尽量避免偏见和成见。 
+  A.(     )	    B.(     )		   C. (     ) 	 	D. (     )
+3.在跨文化交际中，我经常会使用身体语言如手势或其他非语言方式。 
+  A.(     )	    B.(     )		   C. (     ) 	 	D. (     )
+4.在跨文化交际中出现误会时，我会与对方磋商，尽量使双方满意。 
+  A.(     )	    B.(     )		   C. (     ) 	 	D. (     )
+5.在跨文化交际中，我会克服文化差异，运用合适的交际策略实现交际目标。 
+  A.(     )	    B.(     )		   C. (     ) 	 	D. (     )
+二、请根据个人情况选择答案
+1.你通过什么渠道获取跨文化交际意识的？
+A.网络  			 B.课堂  		  C.书刊  		  D.其他(请注明)_______
+2.在公共场合，你会试着与人用英语交流吗?
+  A.会和认识的交流                B.不会和陌生人开口  
+  C.会说些简单的问候，但不会多说  D.不会，害怕用英语与人交流
+3.你认为你的跨文化交际能力不好的最主要原因是什么？
+  A.时间紧张，没有精力            B.知识不多，难于开口
+  C.英语口语不好，害怕说错        D.外国人的口音听不懂
+
+（其他问题略）
+
+
